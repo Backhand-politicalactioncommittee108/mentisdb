@@ -1,0 +1,94 @@
+0.3.0 MAR/12/2026
+Note: historical entries below use the original ThoughtChain / thoughtchaind
+names because they describe earlier releases. The project is now being
+rebranded to MentisDB / mentisdbd.
+This release also records the project rename from ThoughtChain to MentisDB.
+
+ - feat: Introduce ThoughtChain schema version `1`
+   - Added explicit `schema_version` to durable thought records
+   - Added optional `signing_key_id` and `thought_signature` fields for future signed-agent provenance
+   - Added a stable signable thought payload path so signatures can target canonicalized thought data
+ - feat: Move shared-agent metadata into registries
+   - Added per-chain `AgentRegistry` sidecars for display names, owners, aliases, public keys, and agent activity metadata
+   - New thoughts now store stable `agent_id` attribution while registry metadata resolves `agent_name` and `agent_owner` at read time
+   - Query, memory export, JSON rendering, and `thoughtchain_list_agents` now resolve identity metadata from the registry instead of scanning or duplicating inline agent profile fields
+ - feat: Add a global ThoughtChain registry and richer discovery metadata
+   - Added a durable registry of chains with chain key, schema version, storage adapter, storage location, thought count, and agent count
+   - `thoughtchain_list_chains` and `GET /v1/chains` now return richer chain summaries instead of only chain keys
+   - Server chain discovery overlays live in-process counts on top of persisted registry metadata
+ - feat: Add automatic migration from legacy schema version `0`
+   - `thoughtchaind` now scans discovered chains at startup, migrates legacy JSONL and binary chains to version `1`, archives the old files, and reports progress in stdout
+   - Migration logic lives in the library so it is reusable from tests and future tooling, not only from the daemon
+   - Added migration coverage for both legacy JSONL and binary chains
+ - feat: Make binary storage the default for new chains
+   - `BinaryStorageAdapter` is now the default storage backend for new chains
+   - Added `THOUGHTCHAIN_DEFAULT_STORAGE_ADAPTER` and retained `THOUGHTCHAIN_STORAGE_ADAPTER` as a compatibility alias
+   - Added bootstrap-time storage adapter override support so callers can explicitly create JSONL or binary chains
+   - Fixed adapter filename resolution so JSONL and binary chains always reopen using the correct file extension
+ - feat: Make the daemon/server stack the default crate experience
+   - `thoughtchain` now enables the `server` feature by default so `cargo install thoughtchain` and `cargo run --bin thoughtchaind` work without extra feature flags
+   - Updated workspace manifests and launcher scripts to rely on the default server-enabled build
+ - docs: Refresh installation, daemon, protocol, and design documentation
+   - Updated README quick-start guidance to emphasize `cargo install thoughtchain`, `thoughtchaind`, and `nohup thoughtchaind &`
+   - Updated MCP and REST protocol docs for schema `1`, registry-backed chain discovery, binary-default storage, bootstrap adapter overrides, and signature fields
+   - Updated the white paper to describe registries, schema versioning, migration, and the signing-oriented data model
+ - test: Expand coverage for the new schema and migration model
+   - Added coverage for stable signable payload generation
+   - Added coverage for v0 to v1 migration
+   - Added server coverage for registry-backed chain summaries and bootstrap adapter overrides
+
+0.2.1 MAR/11/2026
+ - feat: Add env-controlled verbose interaction logging to `thoughtchaind`
+   - Added `THOUGHTCHAIN_VERBOSE` with support for `1`, `0`, `true`, and `false`
+   - When enabled, the daemon logs each ThoughtChain read and write interaction with chain key, touched agents, thought types, roles, tags, and concepts
+   - Startup configuration output now shows the effective verbose setting
+ - test: Add coverage for verbose env parsing in server configuration
+
+0.2.0 MAR/11/2026
+ - feat: Add retrospective memory support
+   - Added `ThoughtType::LessonLearned`
+   - Added `ThoughtRole::Retrospective`
+   - Markdown memory export now surfaces non-default roles such as retrospectives
+ - feat: Add guided retrospective append APIs
+   - Added MCP tool `thoughtchain_append_retrospective`
+   - Added REST endpoint `POST /v1/retrospectives`
+   - Retrospective append defaults to `LessonLearned` and always stores thoughts with role `Retrospective`
+ - feat: Add shared-daemon discovery APIs
+   - Added MCP tool `thoughtchain_list_chains`
+   - Added MCP tool `thoughtchain_list_agents`
+   - Added REST endpoint `GET /v1/chains`
+   - Added REST endpoint `POST /v1/agents`
+ - docs: Update daemon and protocol documentation
+   - Updated `thoughtchain/README.md` with retrospective guidance and MCP setup for Codex, Claude Code, Qwen Code, and GitHub Copilot CLI
+   - Updated the white paper and protocol docs to explain retrospective memory, lessons learned, and shared-daemon discovery
+ - test: Add coverage for retrospective type/role queries, discovery endpoints, and server append behavior
+
+0.1.0 MAR/11/2026
+ - feat: First public release of `thoughtchain`
+   - Standalone Rust crate for semantic, hash-chained memory in long-running and multi-agent systems
+   - Append-only, adapter-backed storage with explicit integrity verification
+   - `StorageAdapter` abstraction for pluggable persistence backends
+   - `JsonlStorageAdapter` as the current default backend
+   - Stable crate metadata prepared for crates.io publishing
+ - feat: Semantic thought model for durable agent memory
+   - Rich `ThoughtType` taxonomy covering preferences, insights, facts, plans, corrections, checkpoints, summaries, surprises, and more
+   - `ThoughtRole` separates semantic meaning from runtime roles such as memory, summary, compression, checkpoint, handoff, and audit
+   - Stable thought ids, timestamps, importance, confidence, tags, concepts, refs, and typed relations
+   - Shared-chain agent attribution via `agent_id`, `agent_name`, and optional `agent_owner`
+ - feat: Query, replay, and export capabilities
+   - Query by text, type, role, tags, concepts, agent ids, importance, confidence, and date range
+   - Prompt-oriented catch-up rendering for session resumption
+   - `MEMORY.md`-style Markdown export generated from chain walks and filters
+   - Chain head inspection and integrity checks for durable memory operations
+ - feat: Server support and standalone daemon
+   - `thoughtchain::server` module behind the `server` feature
+   - MCP server surface for remote agents
+   - REST server surface for services, dashboards, CLIs, and generic HTTP clients
+   - `thoughtchaind` binary to run ThoughtChain as a long-lived process
+   - Env-configurable host, ports, default chain key, and storage directory
+ - docs: Fully documented public API
+   - Rustdoc coverage across public functions, enums, structs, and implementations
+   - Added protocol documentation in the parent repository for both MCP and REST use
+ - test: Dedicated crate test coverage
+   - Separate tests under `thoughtchain/tests`
+   - Coverage for persistence, integrity, querying, export behavior, and server routing

@@ -1,3 +1,9 @@
+0.4.3.8 MAR/16/2026
+ - chore: Add Makefile
+   - Added `Makefile` to the standalone repository root with targets: `build`, `build-mentisdbd`, `release`, `fmt`, `check`, `clippy`, `test`, `bench`, `doc`, `publish`, `publish-dry-run`, `install`, `clean`, and `help`
+   - `bench` target pipes Criterion output through `tee` to `/tmp/mentisdb_bench_results.txt` so benchmark numbers are captured alongside the live terminal display
+   - `install` target installs the `mentisdbd` daemon binary via `cargo install --path .`
+
 0.4.2.7 MAR/16/2026
  - repo: Move MentisDB into its own standalone Git repository
    - Split the `mentisdb/` subtree out of the former `cloudllm` monorepo and preserved the MentisDB commit history in the new repository

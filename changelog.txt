@@ -1,3 +1,9 @@
+0.4.2.7 MAR/16/2026
+ - repo: Move MentisDB into its own standalone Git repository
+   - Split the `mentisdb/` subtree out of the former `cloudllm` monorepo and preserved the MentisDB commit history in the new repository
+   - Updated crate metadata to point at the standalone `CloudLLM-ai/mentisdb` repository
+   - Replaced the old local `../mcp` path dependency with the published `cloudllm_mcp` crate so `mentisdbd` builds and runs from the standalone checkout
+
 0.4.1.6 MAR/16/2026
  - feat: Agent registry public key support
    - Added `AgentPublicKey { key_id, algorithm, public_key_bytes, revoked }` to the per-chain agent registry

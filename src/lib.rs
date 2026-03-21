@@ -2224,12 +2224,16 @@ impl MentisDb {
             index,
             timestamp,
         );
-        self.persist_registries()?;
+        // Insert into all in-memory indexes before pushing so that
+        // self.thoughts.len() still equals `index` (the correct 0-based position).
         self.id_to_index.insert(thought.id, self.thoughts.len());
         self.hash_to_index
             .insert(thought.hash.clone(), self.thoughts.len());
         self.query_indexes.observe(self.thoughts.len(), &thought);
         self.thoughts.push(thought.clone());
+        // Persist after push so thought_count in the registry reflects the
+        // just-appended thought (self.thoughts.len() is now index + 1).
+        self.persist_registries()?;
         Ok(self.thoughts.last().unwrap())
     }
 
@@ -3369,6 +3373,41 @@ fn resolve_storage_kind_for_chain(
 /// Load the registry of all known thought chains for a storage directory.
 pub fn load_registered_chains<P: AsRef<Path>>(chain_dir: P) -> io::Result<MentisDbRegistry> {
     load_mentisdb_registry(chain_dir.as_ref())
+}
+
+/// Refresh stale `thought_count` and `agent_count` values in the on-disk registry
+/// by opening each registered chain and reading live counts.
+///
+/// Call this once at daemon startup to repair any counts that went stale between
+/// runs (e.g. from older versions, hard crashes, or chains appended outside the
+/// running daemon). Only writes the registry file when at least one entry changes.
+pub fn refresh_registered_chain_counts<P: AsRef<Path>>(chain_dir: P) -> io::Result<()> {
+    let chain_dir = chain_dir.as_ref();
+    let mut registry = load_mentisdb_registry(chain_dir)?;
+    if registry.chains.is_empty() {
+        return Ok(());
+    }
+    let now = Utc::now();
+    let mut changed = false;
+    for entry in registry.chains.values_mut() {
+        let storage = entry
+            .storage_adapter
+            .for_chain_key(chain_dir, &entry.chain_key);
+        if let Ok(chain) = MentisDb::open_with_storage(storage) {
+            let live_thoughts = chain.thoughts().len() as u64;
+            let live_agents = chain.agent_registry().agents.len();
+            if entry.thought_count != live_thoughts || entry.agent_count != live_agents {
+                entry.thought_count = live_thoughts;
+                entry.agent_count = live_agents;
+                entry.updated_at = now;
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        save_mentisdb_registry(chain_dir, &registry)?;
+    }
+    Ok(())
 }
 
 /// Migrate all legacy v0 chain files in a storage directory to the current format.

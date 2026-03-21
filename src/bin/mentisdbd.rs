@@ -30,7 +30,7 @@ use mentisdb::server::{
 };
 use mentisdb::{
     load_registered_chains, migrate_registered_chains_with_adapter, migrate_skill_registry,
-    MentisDb, MentisDbMigrationEvent, SkillRegistry, ThoughtType,
+    refresh_registered_chain_counts, MentisDb, MentisDbMigrationEvent, SkillRegistry, ThoughtType,
 };
 use std::sync::Arc;
 
@@ -308,6 +308,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ),
         Err(e) => panic!("Skill registry migration failed — cannot start server: {e}"),
     };
+
+    // Refresh any stale thought_count / agent_count values in the registry JSON.
+    // This repairs counts from older versions, hard crashes, or chains appended
+    // outside the running daemon.  On every append the registry is kept current
+    // (persist_chain_registration), but a startup pass guarantees correctness.
+    if let Err(e) = refresh_registered_chain_counts(&config.service.chain_dir) {
+        log::warn!("Could not refresh chain registry counts: {e}");
+    }
 
     // Register per-thought sound callback when MENTISDB_THOUGHT_SOUNDS is enabled.
     #[cfg(feature = "startup-sound")]

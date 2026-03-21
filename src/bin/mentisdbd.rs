@@ -9,7 +9,8 @@
 //!
 //! - `MENTISDB_DIR`
 //! - `MENTISDB_DEFAULT_KEY`
-//! - `MENTISDB_DEFAULT_STORAGE_ADAPTER`
+//! - `MENTISDB_DEFAULT_STORAGE_ADAPTER` (alias: `MENTISDB_STORAGE_ADAPTER`)
+//! - `MENTISDB_AUTO_FLUSH` (defaults to `true`; set `false` for buffered writes)
 //! - `MENTISDB_VERBOSE` (defaults to `true` when unset)
 //! - `MENTISDB_LOG_FILE`
 //! - `MENTISDB_BIND_HOST`
@@ -17,8 +18,8 @@
 //! - `MENTISDB_REST_PORT`
 //! - `MENTISDB_HTTPS_MCP_PORT` (set to 0 to disable; default 9473)
 //! - `MENTISDB_HTTPS_REST_PORT` (set to 0 to disable; default 9474)
-//! - `MENTISDB_TLS_CERT` (default `~/.mentisdb/tls/cert.pem`)
-//! - `MENTISDB_TLS_KEY` (default `~/.mentisdb/tls/key.pem`)
+//! - `MENTISDB_TLS_CERT` (default `~/.cloudllm/mentisdb/tls/cert.pem`)
+//! - `MENTISDB_TLS_KEY` (default `~/.cloudllm/mentisdb/tls/key.pem`)
 //! - `RUST_LOG`
 
 use env_logger::Env;
@@ -27,7 +28,7 @@ use mentisdb::server::{
 };
 use mentisdb::{
     load_registered_chains, migrate_registered_chains_with_adapter, migrate_skill_registry,
-    MentisDb, MentisDbMigrationEvent,
+    MentisDb, MentisDbMigrationEvent, SkillRegistry,
 };
 
 const MENTIS_BANNER: &str = r#"███╗   ███╗███████╗███╗   ██╗████████╗██╗███████╗
@@ -56,83 +57,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
     let config = MentisDbServerConfig::from_env();
 
-    print_banner();
-    println!("mentisdb v{}", env!("CARGO_PKG_VERSION"));
-    println!("mentisdbd starting");
-    if let Some(report) = &storage_root_migration {
-        println!("Legacy storage adoption:");
-        if report.renamed_root_dir {
-            println!(
-                "  Renamed {} -> {}",
-                report.source_dir.display(),
-                report.target_dir.display()
-            );
-        } else {
-            println!(
-                "  Merged {} legacy entries from {} into {}",
-                report.merged_entries,
-                report.source_dir.display(),
-                report.target_dir.display()
-            );
-        }
-        if report.renamed_registry_file {
-            println!("  Renamed thoughtchain-registry.json -> mentisdb-registry.json");
-        }
-    }
-    println!("Configuration:");
-    print_env_var(
-        "MENTISDB_DIR",
-        Some(config.service.chain_dir.display().to_string()),
-    );
-    print_env_var(
-        "MENTISDB_DEFAULT_KEY",
-        Some(config.service.default_chain_key.clone()),
-    );
-    print_env_var(
-        "MENTISDB_DEFAULT_STORAGE_ADAPTER",
-        Some(config.service.default_storage_adapter.to_string()),
-    );
-    print_env_var("MENTISDB_VERBOSE", Some(config.service.verbose.to_string()));
-    print_env_var(
-        "MENTISDB_LOG_FILE",
-        config
-            .service
-            .log_file
-            .as_ref()
-            .map(|path| path.display().to_string()),
-    );
-    print_env_var("MENTISDB_BIND_HOST", Some(config.mcp_addr.ip().to_string()));
-    print_env_var(
-        "MENTISDB_MCP_PORT",
-        Some(config.mcp_addr.port().to_string()),
-    );
-    print_env_var(
-        "MENTISDB_REST_PORT",
-        Some(config.rest_addr.port().to_string()),
-    );
-    print_env_var(
-        "MENTISDB_HTTPS_MCP_PORT",
-        Some(match config.https_mcp_addr {
-            Some(addr) => addr.port().to_string(),
-            None => "disabled".to_string(),
-        }),
-    );
-    print_env_var(
-        "MENTISDB_HTTPS_REST_PORT",
-        Some(match config.https_rest_addr {
-            Some(addr) => addr.port().to_string(),
-            None => "disabled".to_string(),
-        }),
-    );
-    print_env_var(
-        "MENTISDB_TLS_CERT",
-        Some(config.tls_cert_path.display().to_string()),
-    );
-    print_env_var(
-        "MENTISDB_TLS_KEY",
-        Some(config.tls_key_path.display().to_string()),
-    );
-
+    // Run migrations before starting servers.  Progress lines print live here
+    // (rare — only on first run or version upgrades).
     let migration_reports = migrate_registered_chains_with_adapter(
         &config.service.chain_dir,
         config.service.default_storage_adapter,
@@ -191,14 +117,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             ),
         },
     )?;
-    if migration_reports.is_empty() {
-        println!("No chain migrations required.");
-    }
 
-    // Skill registry migration — must run before start_servers opens the registry.
-    match migrate_skill_registry(&config.service.chain_dir) {
-        Ok(None) => println!("Skill registry: up to date, no migration required."),
-        Ok(Some(report)) => println!(
+    // Capture skill registry migration result to print later.
+    let skill_registry_msg = match migrate_skill_registry(&config.service.chain_dir) {
+        Ok(None) => "Skill registry: up to date, no migration required.".to_string(),
+        Ok(Some(report)) => format!(
             "Skill registry migrated: {} skill(s), {} version(s) converted (v{} → v{}) at {}",
             report.skills_migrated,
             report.versions_migrated,
@@ -207,24 +130,97 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             report.path.display()
         ),
         Err(e) => panic!("Skill registry migration failed — cannot start server: {e}"),
-    }
+    };
 
     let handles = start_servers(config.clone()).await?;
 
-    println!("mentisdbd running");
-    println!("Resolved endpoints:");
-    println!("MCP server:  http://{}", handles.mcp.local_addr());
-    println!("REST server: http://{}", handles.rest.local_addr());
-    if let Some(ref h) = handles.https_mcp {
-        println!("MCP server:  https://{}", h.local_addr());
-    }
-    if let Some(ref h) = handles.https_rest {
-        println!("REST server: https://{}", h.local_addr());
-    }
+    // ── Useful info first ────────────────────────────────────────────────────
     print_endpoint_catalog(&handles);
     print_chain_summary(&config)?;
+    print_agent_registry_summary(&config)?;
+    print_skill_registry_summary(&config)?;
     print_tls_tip(&config, &handles);
     println!("Press Ctrl+C to stop.");
+
+    // ── Startup summary at the bottom ────────────────────────────────────────
+    println!();
+    print_banner();
+    println!("mentisdb v{}", env!("CARGO_PKG_VERSION"));
+    println!("mentisdbd started");
+
+    if let Some(report) = &storage_root_migration {
+        println!("Legacy storage adoption:");
+        if report.renamed_root_dir {
+            println!(
+                "  Renamed {} -> {}",
+                report.source_dir.display(),
+                report.target_dir.display()
+            );
+        } else {
+            println!(
+                "  Merged {} legacy entries from {} into {}",
+                report.merged_entries,
+                report.source_dir.display(),
+                report.target_dir.display()
+            );
+        }
+        if report.renamed_registry_file {
+            println!("  Renamed thoughtchain-registry.json -> mentisdb-registry.json");
+        }
+    }
+
+    println!("Configuration:");
+    print_env_var("MENTISDB_DIR", Some(config.service.chain_dir.display().to_string()));
+    print_env_var("MENTISDB_DEFAULT_KEY", Some(config.service.default_chain_key.clone()));
+    print_env_var(
+        "MENTISDB_DEFAULT_STORAGE_ADAPTER",
+        Some(config.service.default_storage_adapter.to_string()),
+    );
+    print_env_var("MENTISDB_STORAGE_ADAPTER", Some(config.service.default_storage_adapter.to_string()));
+    print_env_var("MENTISDB_AUTO_FLUSH", Some(config.service.auto_flush.to_string()));
+    print_env_var("MENTISDB_VERBOSE", Some(config.service.verbose.to_string()));
+    print_env_var(
+        "MENTISDB_LOG_FILE",
+        config.service.log_file.as_ref().map(|p| p.display().to_string()),
+    );
+    print_env_var("MENTISDB_BIND_HOST", Some(config.mcp_addr.ip().to_string()));
+    print_env_var("MENTISDB_MCP_PORT", Some(config.mcp_addr.port().to_string()));
+    print_env_var("MENTISDB_REST_PORT", Some(config.rest_addr.port().to_string()));
+    print_env_var(
+        "MENTISDB_HTTPS_MCP_PORT",
+        Some(match config.https_mcp_addr {
+            Some(addr) => addr.port().to_string(),
+            None => "disabled".to_string(),
+        }),
+    );
+    print_env_var(
+        "MENTISDB_HTTPS_REST_PORT",
+        Some(match config.https_rest_addr {
+            Some(addr) => addr.port().to_string(),
+            None => "disabled".to_string(),
+        }),
+    );
+    print_env_var("MENTISDB_TLS_CERT", Some(config.tls_cert_path.display().to_string()));
+    print_env_var("MENTISDB_TLS_KEY", Some(config.tls_key_path.display().to_string()));
+    print_env_var(
+        "RUST_LOG",
+        std::env::var("RUST_LOG").ok().or_else(|| Some("info (default)".to_string())),
+    );
+
+    if migration_reports.is_empty() {
+        println!("No chain migrations required.");
+    }
+    println!("{skill_registry_msg}");
+    println!("mentisdbd running");
+    println!("Resolved endpoints:");
+    println!("  MCP:  http://{}", handles.mcp.local_addr());
+    println!("  REST: http://{}", handles.rest.local_addr());
+    if let Some(ref h) = handles.https_mcp {
+        println!("  MCP:  https://{}", h.local_addr());
+    }
+    if let Some(ref h) = handles.https_rest {
+        println!("  REST: https://{}", h.local_addr());
+    }
 
     tokio::signal::ctrl_c().await?;
     Ok(())
@@ -513,10 +509,7 @@ fn print_endpoint_catalog(handles: &MentisDbServerHandles) {
             https_rest.local_addr()
         );
         println!("      Mark one skill as revoked.");
-        println!(
-            "    POST https://{}/v1/bootstrap",
-            https_rest.local_addr()
-        );
+        println!("    POST https://{}/v1/bootstrap", https_rest.local_addr());
         println!("      Bootstrap an empty chain with an initial checkpoint.");
         println!("    POST https://{}/v1/thoughts", https_rest.local_addr());
         println!("      Append a durable thought.");
@@ -576,21 +569,46 @@ fn print_chain_summary(
             entry.agent_count
         );
         println!("    {}", entry.storage_location);
+    }
+    println!();
+    Ok(())
+}
 
+fn print_agent_registry_summary(
+    config: &MentisDbServerConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let registry = load_registered_chains(&config.service.chain_dir)?;
+    println!("Agent Registry:");
+    if registry.chains.is_empty() {
+        println!("  No registered chains.");
+        println!();
+        return Ok(());
+    }
+
+    for entry in registry.chains.values() {
         match MentisDb::open_with_storage(
-            entry
-                .storage_adapter
-                .for_chain_key(&config.service.chain_dir, &entry.chain_key),
+            entry.storage_adapter.for_chain_key(&config.service.chain_dir, &entry.chain_key),
         ) {
             Ok(chain) => {
-                for agent in chain.list_agent_registry() {
+                let agents = chain.list_agent_registry();
+                if agents.is_empty() {
+                    continue;
+                }
+                println!("  chain: {}", entry.chain_key);
+                for agent in agents {
                     let description = agent
                         .description
                         .as_deref()
-                        .filter(|value| !value.trim().is_empty())
+                        .filter(|v| !v.trim().is_empty())
                         .unwrap_or("no description");
+                    // Truncate long descriptions to keep the output readable.
+                    let description = if description.len() > 80 {
+                        format!("{}…", &description[..79])
+                    } else {
+                        description.to_string()
+                    };
                     println!(
-                        "    - {} [{}] | {} | {} thought(s) | {}",
+                        "    {GREEN}{}{RESET} [{}] | {} | {} memories | {}",
                         agent.display_name,
                         agent.agent_id,
                         agent.status,
@@ -599,11 +617,45 @@ fn print_chain_summary(
                     );
                 }
             }
-            Err(error) => println!("    Unable to open chain summary: {error}"),
+            Err(error) => println!("    Unable to open chain {}: {error}", entry.chain_key),
         }
-        println!();
     }
+    println!();
+    Ok(())
+}
 
+fn print_skill_registry_summary(
+    config: &MentisDbServerConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("Skill Registry:");
+    match SkillRegistry::open(&config.service.chain_dir) {
+        Ok(registry) => {
+            let skills = registry.list_skills();
+            if skills.is_empty() {
+                println!("  No skills registered.");
+                println!();
+                return Ok(());
+            }
+            println!("  {} skill(s) registered.", skills.len());
+            for skill in &skills {
+                let tags = if skill.tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", skill.tags.join(", "))
+                };
+                println!(
+                    "    {GREEN}{}{RESET} | {:?} | {} version(s){} | by {}",
+                    skill.name,
+                    skill.status,
+                    skill.version_count,
+                    tags,
+                    skill.latest_uploaded_by_agent_id
+                );
+            }
+        }
+        Err(_) => println!("  No skill registry found."),
+    }
+    println!();
     Ok(())
 }
 
@@ -623,9 +675,7 @@ fn print_tls_tip(config: &MentisDbServerConfig, handles: &MentisDbServerHandles)
 
     println!("TLS Certificate: {}", config.tls_cert_path.display());
     println!();
-    println!(
-        "  {YELLOW}my.mentisdb.com{RESET} is a public DNS A-record \u{2192} 127.0.0.1"
-    );
+    println!("  {YELLOW}my.mentisdb.com{RESET} is a public DNS A-record \u{2192} 127.0.0.1");
     println!("  You can use it as a friendly hostname for this local daemon.");
     if let Some(port) = mcp_port {
         println!("  MCP:  https://my.mentisdb.com:{port}");
@@ -635,16 +685,9 @@ fn print_tls_tip(config: &MentisDbServerConfig, handles: &MentisDbServerHandles)
     }
     println!();
     println!("  To avoid certificate warnings, trust the self-signed cert once:");
-    println!(
-        "  {GREEN}macOS{RESET}:   sudo security add-trusted-cert -d -r trustRoot \\"
-    );
-    println!(
-        "             -k /Library/Keychains/System.keychain \\"
-    );
-    println!(
-        "             {}",
-        config.tls_cert_path.display()
-    );
+    println!("  {GREEN}macOS{RESET}:   sudo security add-trusted-cert -d -r trustRoot \\");
+    println!("             -k /Library/Keychains/System.keychain \\");
+    println!("             {}", config.tls_cert_path.display());
     println!(
         "  {GREEN}Linux{RESET}:   sudo cp {} /usr/local/share/ca-certificates/mentisdb.crt",
         config.tls_cert_path.display()

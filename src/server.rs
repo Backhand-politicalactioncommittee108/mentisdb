@@ -66,7 +66,7 @@ use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 // TLS
 use axum_server::tls_rustls::RustlsConfig;
-use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, SanType, date_time_ymd};
+use rcgen::{date_time_ymd, CertificateParams, DistinguishedName, DnType, KeyPair, SanType};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
@@ -575,7 +575,13 @@ pub async fn start_https_mcp_server(
     key_path: PathBuf,
 ) -> Result<ServerHandle, Box<dyn Error + Send + Sync>> {
     let service = Arc::new(MentisDbService::new(config));
-    start_tls_router(addr, standard_and_legacy_mcp_router(service, addr), cert_path, key_path).await
+    start_tls_router(
+        addr,
+        standard_and_legacy_mcp_router(service, addr),
+        cert_path,
+        key_path,
+    )
+    .await
 }
 
 /// Start a standalone MentisDb REST server over HTTPS/TLS.
@@ -628,7 +634,12 @@ pub async fn start_servers(
         None
     };
 
-    Ok(MentisDbServerHandles { mcp, rest, https_mcp, https_rest })
+    Ok(MentisDbServerHandles {
+        mcp,
+        rest,
+        https_mcp,
+        https_rest,
+    })
 }
 
 /// Build the MCP router without binding a socket.
@@ -2585,10 +2596,7 @@ async fn start_router(
 /// # Errors
 ///
 /// Returns an error if key generation, certificate signing, or file I/O fails.
-fn ensure_tls_cert(
-    cert_path: &Path,
-    key_path: &Path,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+fn ensure_tls_cert(cert_path: &Path, key_path: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
     if cert_path.exists() && key_path.exists() {
         return Ok(());
     }

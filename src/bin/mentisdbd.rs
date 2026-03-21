@@ -47,6 +47,8 @@ const DB_BANNER: &str = r#"██████╗ ██████╗
 const GREEN: &str = "\x1b[38;5;82m";
 const YELLOW: &str = "\x1b[38;5;226m";
 const PINK: &str = "\x1b[38;5;213m";
+const CYAN: &str = "\x1b[38;5;87m";
+const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 
 // ── Startup jingle ────────────────────────────────────────────────────────────
@@ -69,7 +71,12 @@ impl SquareWave {
     fn new(freq: f32, duration_ms: u64) -> Self {
         const SR: u32 = 44_100;
         let num_samples = (SR as f64 * duration_ms as f64 / 1_000.0) as usize;
-        Self { freq, sample_rate: SR, num_samples, elapsed: 0 }
+        Self {
+            freq,
+            sample_rate: SR,
+            num_samples,
+            elapsed: 0,
+        }
     }
 }
 
@@ -89,9 +96,15 @@ impl Iterator for SquareWave {
 
 #[cfg(feature = "startup-sound")]
 impl rodio::Source for SquareWave {
-    fn current_frame_len(&self) -> Option<usize> { None }
-    fn channels(&self) -> u16 { 1 }
-    fn sample_rate(&self) -> u32 { self.sample_rate }
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+    fn channels(&self) -> u16 {
+        1
+    }
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
     fn total_duration(&self) -> Option<std::time::Duration> {
         Some(std::time::Duration::from_millis(
             self.num_samples as u64 * 1_000 / self.sample_rate as u64,
@@ -105,7 +118,7 @@ impl rodio::Source for SquareWave {
 /// - **C5** (523 Hz) — "men"
 /// - **E5** (659 Hz) — "tis"
 /// - **D5** (587 Hz) — "D"  ← actual note name
-/// - **B4** (494 Hz) — "B"  ← actual note name
+/// - **B5** (988 Hz) — "B"  ← actual note name, high octave
 ///
 /// Silenced by setting `MENTISDB_STARTUP_SOUND=0` (or `false`/`no`/`off`).
 #[cfg(feature = "startup-sound")]
@@ -117,12 +130,7 @@ fn play_startup_jingle() {
         return;
     }
     // men   tis    D      B
-    let notes: &[(f32, u64)] = &[
-        (523.25, 160),
-        (659.25, 160),
-        (587.33, 160),
-        (493.88, 380),
-    ];
+    let notes: &[(f32, u64)] = &[(523.25, 160), (659.25, 160), (587.33, 160), (987.77, 380)];
     if let Ok((_stream, handle)) = rodio::OutputStream::try_default() {
         if let Ok(sink) = rodio::Sink::try_new(&handle) {
             for &(freq, ms) in notes {
@@ -672,29 +680,214 @@ fn print_endpoint_catalog(handles: &MentisDbServerHandles) {
     }
 }
 
+// ── ASCII table renderer ───────────────────────────────────────────────────────
+
+/// Renders a bordered ASCII table to stdout.
+///
+/// `title`   – printed as a bold header above the table (pass `""` to skip).  
+/// `headers` – column header strings.  
+/// `rows`    – each inner `Vec<String>` is one data row; must match `headers` length.
+///
+/// Produces output like:
+/// ```text
+/// ┌──────────────┬─────────┬──────────┐
+/// │  Chain Key   │ Version │ Thoughts │
+/// ├──────────────┼─────────┼──────────┤
+/// │ borganism-.. │    1    │   177    │
+/// └──────────────┴─────────┴──────────┘
+/// ```
+fn ascii_table(title: &str, headers: &[&str], rows: &[Vec<String>]) {
+    // Compute column widths (max of header vs every cell, plus 2-char padding).
+    let ncols = headers.len();
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < ncols {
+                widths[i] = widths[i].max(cell.len());
+            }
+        }
+    }
+
+    // Box-drawing helpers.
+    let bar = |left: &str, fill: &str, sep: &str, right: &str| {
+        let mut s = left.to_string();
+        for (i, w) in widths.iter().enumerate() {
+            s.push_str(&fill.repeat(w + 2));
+            s.push_str(if i + 1 < ncols { sep } else { right });
+        }
+        s
+    };
+
+    let top    = bar("┌", "─", "┬", "┐");
+    let mid    = bar("├", "─", "┼", "┤");
+    let bottom = bar("└", "─", "┴", "┘");
+
+    let fmt_row = |cells: &[String]| {
+        let mut s = "│".to_string();
+        for (i, cell) in cells.iter().enumerate() {
+            if i < ncols {
+                s.push_str(&format!(" {:<width$} │", cell, width = widths[i]));
+            }
+        }
+        s
+    };
+
+    let fmt_header = |cells: &[&str]| {
+        let mut s = "│".to_string();
+        for (i, cell) in cells.iter().enumerate() {
+            if i < ncols {
+                // Headers are bold/cyan.
+                s.push_str(&format!(
+                    " {CYAN}{:<width$}{RESET} │",
+                    cell,
+                    width = widths[i]
+                ));
+            }
+        }
+        s
+    };
+
+    if !title.is_empty() {
+        println!("{YELLOW}{title}{RESET}");
+    }
+    println!("{DIM}{top}{RESET}");
+    println!("{}", fmt_header(headers));
+    println!("{DIM}{mid}{RESET}");
+    for row in rows {
+        println!("{}", fmt_row(row));
+    }
+    println!("{DIM}{bottom}{RESET}");
+    println!();
+}
+
+/// Like `ascii_table` but inserts a full-width "section" separator row
+/// (e.g. a chain name) to group subsequent rows under it.
+///
+/// `sections` is a slice of `(section_label, rows_for_that_section)`.
+fn ascii_table_grouped(
+    title: &str,
+    headers: &[&str],
+    sections: &[(String, Vec<Vec<String>>)],
+) {
+    let ncols = headers.len();
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    for (label, rows) in sections {
+        // The section label spans the full table width; we account for it
+        // separately after we know all column widths.
+        let _ = label;
+        for row in rows {
+            for (i, cell) in row.iter().enumerate() {
+                if i < ncols {
+                    widths[i] = widths[i].max(cell.len());
+                }
+            }
+        }
+    }
+
+    // Total inner width (columns + separators) for a full-span label row.
+    let total_inner: usize = widths.iter().sum::<usize>() + ncols * 3 - 1;
+    // Ensure each section label fits.
+    // (We'll truncate labels that are too long rather than widen the table.)
+
+    let bar = |left: &str, fill: &str, sep: &str, right: &str| {
+        let mut s = left.to_string();
+        for (i, w) in widths.iter().enumerate() {
+            s.push_str(&fill.repeat(w + 2));
+            s.push_str(if i + 1 < ncols { sep } else { right });
+        }
+        s
+    };
+
+    let section_bar = |left: &str, fill: &str, right: &str| {
+        format!("{}{}{}", left, fill.repeat(total_inner), right)
+    };
+
+    let top    = bar("┌", "─", "┬", "┐");
+    let mid    = bar("├", "─", "┼", "┤");
+    let bottom = bar("└", "─", "┴", "┘");
+    let sec_mid  = section_bar("├", "─", "┤");
+    let sec_mid2 = bar("├", "─", "┼", "┤");
+
+    let fmt_row = |cells: &[String]| {
+        let mut s = "│".to_string();
+        for (i, cell) in cells.iter().enumerate() {
+            if i < ncols {
+                s.push_str(&format!(" {:<width$} │", cell, width = widths[i]));
+            }
+        }
+        s
+    };
+
+    let fmt_header = |cells: &[&str]| {
+        let mut s = "│".to_string();
+        for (i, cell) in cells.iter().enumerate() {
+            if i < ncols {
+                s.push_str(&format!(
+                    " {CYAN}{:<width$}{RESET} │",
+                    cell,
+                    width = widths[i]
+                ));
+            }
+        }
+        s
+    };
+
+    let fmt_section_label = |label: &str| {
+        let label = if label.len() > total_inner {
+            format!("{}…", &label[..total_inner.saturating_sub(1)])
+        } else {
+            label.to_string()
+        };
+        format!("│ {PINK}{:<width$}{RESET} │", label, width = total_inner - 2)
+    };
+
+    if !title.is_empty() {
+        println!("{YELLOW}{title}{RESET}");
+    }
+    println!("{DIM}{top}{RESET}");
+    println!("{}", fmt_header(headers));
+
+    for (s_idx, (label, rows)) in sections.iter().enumerate() {
+        println!("{DIM}{}{RESET}", if s_idx == 0 { &mid } else { &sec_mid2 });
+        println!("{DIM}{sec_mid}{RESET}");
+        println!("{}", fmt_section_label(label));
+        println!("{DIM}{sec_mid}{RESET}");
+        for row in rows {
+            println!("{}", fmt_row(row));
+        }
+    }
+
+    println!("{DIM}{bottom}{RESET}");
+    println!();
+}
+
 fn print_chain_summary(
     config: &MentisDbServerConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let registry = load_registered_chains(&config.service.chain_dir)?;
-    println!("Chain Summary:");
     if registry.chains.is_empty() {
-        println!("  No registered chains.");
-        println!();
+        println!("{YELLOW}Chain Summary{RESET}");
+        println!("  No registered chains.\n");
         return Ok(());
     }
 
-    for entry in registry.chains.values() {
-        println!(
-            "  {} | version {} | {} | {} thoughts | {} agents",
-            entry.chain_key,
-            entry.version,
-            entry.storage_adapter,
-            entry.thought_count,
-            entry.agent_count
-        );
-        println!("    {}", entry.storage_location);
-    }
-    println!();
+    let headers = &["Chain Key", "Ver", "Adapter", "Thoughts", "Agents", "Storage Location"];
+    let rows: Vec<Vec<String>> = registry
+        .chains
+        .values()
+        .map(|e| {
+            vec![
+                e.chain_key.clone(),
+                e.version.to_string(),
+                e.storage_adapter.to_string(),
+                e.thought_count.to_string(),
+                e.agent_count.to_string(),
+                e.storage_location.clone(),
+            ]
+        })
+        .collect();
+
+    ascii_table("Chain Summary", headers, &rows);
     Ok(())
 }
 
@@ -702,12 +895,14 @@ fn print_agent_registry_summary(
     config: &MentisDbServerConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let registry = load_registered_chains(&config.service.chain_dir)?;
-    println!("Agent Registry:");
     if registry.chains.is_empty() {
-        println!("  No registered chains.");
-        println!();
+        println!("{YELLOW}Agent Registry{RESET}");
+        println!("  No registered chains.\n");
         return Ok(());
     }
+
+    let headers = &["Name", "ID", "Status", "Memories", "Description"];
+    let mut sections: Vec<(String, Vec<Vec<String>>)> = Vec::new();
 
     for entry in registry.chains.values() {
         match MentisDb::open_with_storage(
@@ -720,68 +915,89 @@ fn print_agent_registry_summary(
                 if agents.is_empty() {
                     continue;
                 }
-                println!("  chain: {}", entry.chain_key);
-                for agent in agents {
-                    let description = agent
-                        .description
-                        .as_deref()
-                        .filter(|v| !v.trim().is_empty())
-                        .unwrap_or("no description");
-                    // Truncate long descriptions to keep the output readable.
-                    let description = if description.len() > 80 {
-                        format!("{}…", &description[..79])
-                    } else {
-                        description.to_string()
-                    };
-                    println!(
-                        "    {GREEN}{}{RESET} [{}] | {} | {} memories | {}",
-                        agent.display_name,
-                        agent.agent_id,
-                        agent.status,
-                        agent.thought_count,
-                        description
-                    );
-                }
+                let rows: Vec<Vec<String>> = agents
+                    .into_iter()
+                    .map(|agent| {
+                        let desc = agent
+                            .description
+                            .as_deref()
+                            .filter(|v| !v.trim().is_empty())
+                            .unwrap_or("—");
+                        let desc = if desc.len() > 60 {
+                            format!("{}…", &desc[..59])
+                        } else {
+                            desc.to_string()
+                        };
+                        vec![
+                            agent.display_name.clone(),
+                            agent.agent_id.clone(),
+                            agent.status.to_string(),
+                            agent.thought_count.to_string(),
+                            desc,
+                        ]
+                    })
+                    .collect();
+                sections.push((entry.chain_key.clone(), rows));
             }
-            Err(error) => println!("    Unable to open chain {}: {error}", entry.chain_key),
+            Err(error) => {
+                sections.push((
+                    entry.chain_key.clone(),
+                    vec![vec![
+                        format!("error: {error}"),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                    ]],
+                ));
+            }
         }
     }
-    println!();
+
+    if sections.is_empty() {
+        println!("{YELLOW}Agent Registry{RESET}");
+        println!("  No agents registered.\n");
+    } else {
+        ascii_table_grouped("Agent Registry", headers, &sections);
+    }
     Ok(())
 }
 
 fn print_skill_registry_summary(
     config: &MentisDbServerConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("Skill Registry:");
     match SkillRegistry::open(&config.service.chain_dir) {
         Ok(registry) => {
             let skills = registry.list_skills();
             if skills.is_empty() {
-                println!("  No skills registered.");
-                println!();
+                println!("{YELLOW}Skill Registry{RESET}");
+                println!("  No skills registered.\n");
                 return Ok(());
             }
-            println!("  {} skill(s) registered.", skills.len());
-            for skill in &skills {
-                let tags = if skill.tags.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [{}]", skill.tags.join(", "))
-                };
-                println!(
-                    "    {GREEN}{}{RESET} | {:?} | {} version(s){} | by {}",
-                    skill.name,
-                    skill.status,
-                    skill.version_count,
-                    tags,
-                    skill.latest_uploaded_by_agent_id
-                );
-            }
+            let headers = &["Name", "Status", "Versions", "Tags", "Uploaded By"];
+            let rows: Vec<Vec<String>> = skills
+                .iter()
+                .map(|skill| {
+                    vec![
+                        skill.name.clone(),
+                        format!("{:?}", skill.status),
+                        skill.version_count.to_string(),
+                        if skill.tags.is_empty() {
+                            "—".to_string()
+                        } else {
+                            skill.tags.join(", ")
+                        },
+                        skill.latest_uploaded_by_agent_id.clone(),
+                    ]
+                })
+                .collect();
+            ascii_table("Skill Registry", headers, &rows);
         }
-        Err(_) => println!("  No skill registry found."),
+        Err(_) => {
+            println!("{YELLOW}Skill Registry{RESET}");
+            println!("  No skill registry found.\n");
+        }
     }
-    println!();
     Ok(())
 }
 

@@ -1,4 +1,4 @@
-0.5.0 MAR/21/2026
+0.5.0.9 MAR/21/2026
  - feat: HTTPS/TLS support for mentisdbd
    - Added HTTPS listeners for both MCP (port 9473) and REST (port 9474) alongside existing HTTP listeners
    - Auto-generates a self-signed TLS certificate on first startup via `rcgen`, saved to `~/.mentisdb/tls/cert.pem` and `~/.mentisdb/tls/key.pem`
@@ -9,6 +9,36 @@
    - `MentisDbServerConfig` extended with `https_mcp_addr`, `https_rest_addr`, `tls_cert_path`, `tls_key_path`
    - `MentisDbServerHandles` extended with `https_mcp: Option<ServerHandle>`, `https_rest: Option<ServerHandle>`
    - Daemon startup prints HTTPS endpoints, TLS cert path, per-OS cert trust commands, and `my.mentisdb.com` tip
+ - feat: Startup jingle (PC-speaker style, `startup-sound` feature)
+   - 4-note square-wave sequence on daemon start: C5 → E5 → D5 → B5 ("men-tis-D-B")
+   - Implemented via `rodio` (CoreAudio / ALSA / WASAPI); feature-gated as `startup-sound` (on by default)
+   - Jingle plays after the banner and configuration block are fully flushed to stdout, so visual output is always complete before sound
+   - Silence with `MENTISDB_STARTUP_SOUND=0` / `false` / `no` / `off`
+   - `MENTISDB_STARTUP_SOUND` added to the Configuration printout and `.env.example`
+ - feat: Per-thought-type sound signatures (`MENTISDB_THOUGHT_SOUNDS`)
+   - When enabled, a distinct ≤200ms square-wave sequence plays every time a thought is appended, keyed to its `ThoughtType`
+   - 28 unique signatures; sequences are tuned to evoke the thought type (e.g. `Surprise` mirrors the Metal Gear Solid "!" alert: C5→E5→G5→C6)
+   - Implemented via an `on_thought_appended: Option<Arc<dyn Fn(ThoughtType) + Send + Sync>>` callback on `MentisDbServiceConfig`; fired asynchronously via `spawn_blocking` so audio never blocks the append path
+   - Defaults to `false` (opt-in) to avoid annoying users; toggle with `MENTISDB_THOUGHT_SOUNDS=true`
+   - `MENTISDB_THOUGHT_SOUNDS` added to the Configuration printout and `.env.example`
+ - ux: Reorder daemon startup output — useful info first, branding last
+   - Endpoint catalog is now printed first (MCP / REST / HTTPS addresses)
+   - Chain summary, Agent Registry summary, and Skill Registry summary follow
+   - ASCII banner, version line, and Configuration block move to the bottom so operators see actionable info immediately
+ - ux: ASCII-table startup summaries with ANSI colour
+   - Chain Summary, Agent Registry, and Skill Registry are rendered as bordered ASCII tables using box-drawing characters
+   - Column headers are printed in cyan; section separators and borders use dim styling
+   - Agent Registry groups agents by chain key with a full-width pink section label row per chain
+ - ux: Startup summaries show all configured env variables
+   - Every supported `MENTISDB_*` env var is listed in the Configuration block, including those that were previously omitted
+ - fix: Chain Summary now reads live thought and agent counts instead of stale registry values
+   - Each chain is opened via `MentisDb::open_with_storage` at print time; stale registry values are only used as a fallback when a chain cannot be opened
+ - fix: Off-by-one in `persist_chain_registration` — registry always stored N-1 thoughts
+   - `persist_registries()` was called before `self.thoughts.push()` so `thought_count` written to `mentisdb-registry.json` was the pre-append count
+   - Moved `persist_registries()` to after `self.thoughts.push()` so the persisted count always equals the post-append chain length
+ - feat: `refresh_registered_chain_counts()` — startup registry repair
+   - New public function that opens each registered chain, reads live `thought_count` and `agent_count`, and rewrites the registry JSON only when at least one entry has drifted
+   - Called at daemon startup after chain migrations so any counts corrupted by the previous off-by-one bug (or by chains appended outside the daemon) are corrected on first boot
  - chore: Add `.env.example` documenting all supported environment variables with comments
  - chore: Bump version to 0.5.0
 
@@ -218,10 +248,3 @@ This release also records the project rename from ThoughtChain to MentisDB.
    - Separate tests under `thoughtchain/tests`
    - Coverage for persistence, integrity, querying, export behavior, and server routing
 
-v0.5.1
-------
-- Startup jingle: 4-note square-wave PC-speaker-style sound on daemon start
-  ("men-tis-D-B" → C5 → E5 → D5 → B4).  Implemented via rodio (CoreAudio /
-  ALSA / WASAPI); feature-gated as `startup-sound` (on by default).
-  Silence with MENTISDB_STARTUP_SOUND=0.
-- MENTISDB_STARTUP_SOUND added to Configuration printout.

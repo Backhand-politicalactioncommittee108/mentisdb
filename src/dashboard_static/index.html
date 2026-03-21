@@ -447,8 +447,11 @@
     document.getElementById('modal-body').innerHTML = `
       <dl class="t-fields">
         <dt>Index</dt>  <dd>${esc(String(thought.index ?? '—'))}</dd>
-        <dt>ID</dt>     <dd class="mono" style="font-size:0.8rem;word-break:break-all">${esc(thought.thought_id || '—')}</dd>
-        <dt>Hash</dt>   <dd class="mono" style="font-size:0.8rem;word-break:break-all">${esc(thought.thought_hash || '—')}</dd>
+        <dt>ID</dt>     <dd class="mono" style="font-size:0.8rem;word-break:break-all">${esc(thought.id || thought.thought_id || '—')}</dd>
+        <dt>Hash</dt>   <dd class="mono" style="font-size:0.8rem;word-break:break-all;display:flex;align-items:center;gap:8px">
+          <span id="modal-hash-val">${esc(thought.hash || thought.thought_hash || '—')}</span>
+          ${(thought.hash||thought.thought_hash) ? `<button onclick="navigator.clipboard.writeText('${esc(thought.hash||thought.thought_hash)}').then(()=>{this.textContent='✓';setTimeout(()=>this.textContent='⎘',1200)})" title="Copy hash" style="background:none;border:1px solid #30363d;border-radius:4px;color:#8b949e;cursor:pointer;font-size:0.75rem;padding:1px 6px;flex-shrink:0">⎘</button>` : ''}
+        </dd>
         <dt>Type</dt>   <dd>${typeBadge(thought.thought_type)}</dd>
         <dt>Role</dt>   <dd>${thought.role ? `<span class="badge badge-gray">${esc(thought.role)}</span>` : '<span style="color:#484f58">—</span>'}</dd>
         <dt>Agent</dt>  <dd class="mono" style="font-size:0.82rem">${esc(thought.agent_id || '—')}</dd>

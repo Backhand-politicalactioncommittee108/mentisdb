@@ -18,26 +18,28 @@ startup-sound = ["dep:rodio"]
 
 [dependencies]
 async-trait = "0.1.89"
+# WARNING: do not update bincode to 3.0.0, it's not functional
 bincode = { version = "2.0.1", features = ["serde"] }
 dashmap = "6"
 chrono = { version = "0.4.44", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-diffy = "0.3"
+diffy = "0.4"
 ed25519-dalek = { version = "2", features = ["alloc"] }
 sha2 = "0.10.9"
 uuid = { version = "1.22.0", features = ["v4", "serde"] }
 mcp = { package = "cloudllm_mcp", version = "0.1.0" }
 axum = { version = "0.8.8", optional = true }
-axum-server = { version = "0.7", features = ["tls-rustls"], optional = true }
+axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
 env_logger = { version = "0.11.8", optional = true }
 log = { version = "0.4.28", optional = true }
-rcgen = { version = "0.13", optional = true }
+rcgen = { version = "0.14", optional = true }
 rustls-pemfile = { version = "2", optional = true }
-rodio = { version = "0.17", optional = true }
+rodio = { version = "0.22", optional = true }
 tokio = { version = "1.50.0", features = ["full"], optional = true }
 
 [dev-dependencies]
+# WARNING: do not update bincode to 3.0.0, it's not functional
 bincode = { version = "2.0.1", features = ["serde"] }
 chrono = { version = "0.4.44", features = ["serde"] }
 criterion = { version = "0.5", features = ["html_reports"] }

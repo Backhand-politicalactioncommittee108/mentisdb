@@ -345,7 +345,12 @@ fn parse_thought_type(s: &str) -> Option<ThoughtType> {
 /// When `reverse` is `true` the slice is returned newest-first (descending by
 /// append index). Pagination is applied *after* reversing so that page 1 is
 /// always the logical "first" page in the chosen order.
-fn paginated_thoughts(mut thoughts: Vec<&Thought>, page: usize, per_page: usize, reverse: bool) -> Value {
+fn paginated_thoughts(
+    mut thoughts: Vec<&Thought>,
+    page: usize,
+    per_page: usize,
+    reverse: bool,
+) -> Value {
     if reverse {
         thoughts.reverse();
     }
@@ -396,8 +401,9 @@ struct DiffQuery {
 
 /// `GET /dashboard/api/chains`
 ///
-/// Returns a JSON array of chain summaries loaded from the on-disk registry.
-/// Live counts are pulled from the in-memory cache when available.
+/// Returns a JSON array of chain summaries with live thought and agent counts.
+/// Each chain is opened on demand via [`get_or_open_chain`] (which also caches
+/// it in `state.chains`) so counts are never read from a stale registry value.
 async fn api_chains(
     State(state): State<DashboardState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -405,26 +411,15 @@ async fn api_chains(
 
     let mut chains = Vec::with_capacity(registry.chains.len());
 
-    for (chain_key, reg) in &registry.chains {
-        // Clone the Arc before awaiting to avoid holding the DashMap shard lock.
-        let cached = state.chains.get(chain_key).map(|r| r.value().clone());
-
-        let (thought_count, agent_count, head_hash) = if let Some(arc) = cached {
-            let chain = arc.read().await;
-            (
-                chain.thoughts().len(),
-                chain.agent_registry().agents.len(),
-                chain.head_hash().map(ToString::to_string),
-            )
-        } else {
-            (reg.thought_count as usize, reg.agent_count, None)
-        };
-
+    for chain_key in registry.chains.keys() {
+        // Open (or retrieve from cache) to guarantee live counts.
+        let arc = get_or_open_chain(&state, chain_key).await?;
+        let chain = arc.read().await;
         chains.push(json!({
             "chain_key": chain_key,
-            "thought_count": thought_count,
-            "agent_count": agent_count,
-            "head_hash": head_hash,
+            "thought_count": chain.thoughts().len(),
+            "agent_count":   chain.agent_registry().agents.len(),
+            "head_hash":     chain.head_hash().map(ToString::to_string),
         }));
     }
 

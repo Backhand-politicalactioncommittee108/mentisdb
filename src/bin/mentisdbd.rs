@@ -98,14 +98,14 @@ impl Iterator for SquareWave {
 
 #[cfg(feature = "startup-sound")]
 impl rodio::Source for SquareWave {
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         None
     }
-    fn channels(&self) -> u16 {
-        1
+    fn channels(&self) -> std::num::NonZero<u16> {
+        std::num::NonZero::new(1).unwrap()
     }
-    fn sample_rate(&self) -> u32 {
-        self.sample_rate
+    fn sample_rate(&self) -> std::num::NonZero<u32> {
+        std::num::NonZero::new(self.sample_rate).unwrap()
     }
     fn total_duration(&self) -> Option<std::time::Duration> {
         Some(std::time::Duration::from_millis(
@@ -206,13 +206,12 @@ fn thought_sound_sequence(tt: ThoughtType) -> &'static [(f32, u64)] {
 /// Plays a sequence of square-wave notes.
 #[cfg(feature = "startup-sound")]
 fn play_notes(notes: &[(f32, u64)]) {
-    if let Ok((_stream, handle)) = rodio::OutputStream::try_default() {
-        if let Ok(sink) = rodio::Sink::try_new(&handle) {
-            for &(freq, ms) in notes {
-                sink.append(SquareWave::new(freq, ms));
-            }
-            sink.sleep_until_end();
+    if let Ok(device_sink) = rodio::DeviceSinkBuilder::open_default_sink() {
+        let sink = rodio::Player::connect_new(device_sink.mixer());
+        for &(freq, ms) in notes {
+            sink.append(SquareWave::new(freq, ms));
         }
+        sink.sleep_until_end();
     }
 }
 
@@ -478,11 +477,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("mentisdbd running");
 
     // ── Resolved endpoints (local + friendly) ────────────────────────────────
-    let mcp_local  = format!("http://{}",  handles.mcp.local_addr());
-    let rest_local = format!("http://{}",  handles.rest.local_addr());
-    let mcp_port   = handles.mcp.local_addr().port();
-    let rest_port  = handles.rest.local_addr().port();
-    let mcp_friendly  = format!("http://my.mentisdb.com:{mcp_port}");
+    let mcp_local = format!("http://{}", handles.mcp.local_addr());
+    let rest_local = format!("http://{}", handles.rest.local_addr());
+    let mcp_port = handles.mcp.local_addr().port();
+    let rest_port = handles.rest.local_addr().port();
+    let mcp_friendly = format!("http://my.mentisdb.com:{mcp_port}");
     let rest_friendly = format!("http://my.mentisdb.com:{rest_port}");
 
     println!("Resolved endpoints:");
@@ -490,20 +489,20 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("  REST (HTTP)  {rest_local:<32}  {YELLOW}{rest_friendly}{RESET}");
 
     if let Some(ref h) = handles.https_mcp {
-        let local    = format!("https://{}", h.local_addr());
-        let port     = h.local_addr().port();
+        let local = format!("https://{}", h.local_addr());
+        let port = h.local_addr().port();
         let friendly = format!("https://my.mentisdb.com:{port}");
         println!("  MCP  (TLS)   {local:<32}  {YELLOW}{friendly}{RESET}");
     }
     if let Some(ref h) = handles.https_rest {
-        let local    = format!("https://{}", h.local_addr());
-        let port     = h.local_addr().port();
+        let local = format!("https://{}", h.local_addr());
+        let port = h.local_addr().port();
         let friendly = format!("https://my.mentisdb.com:{port}");
         println!("  REST (TLS)   {local:<32}  {YELLOW}{friendly}{RESET}");
     }
     if let Some(ref h) = handles.dashboard {
-        let local    = format!("http://{}/dashboard", h.local_addr());
-        let port     = h.local_addr().port();
+        let local = format!("http://{}/dashboard", h.local_addr());
+        let port = h.local_addr().port();
         let friendly = format!("http://my.mentisdb.com:{port}/dashboard");
         println!("  Dashboard    {local:<32}  {YELLOW}{friendly}{RESET}");
     }
@@ -1033,29 +1032,19 @@ fn print_chain_summary(
         "Agents",
         "Storage Location",
     ];
-    // Open each chain to read live counts — the registry JSON is only updated on
-    // migration so its thought_count/agent_count can be stale.
+    // `refresh_registered_chain_counts` has already run before servers start and
+    // written live thought/agent counts to the registry.  Read directly from
+    // that refreshed registry — no need to re-open every chain file here.
     let rows: Vec<Vec<String>> = registry
         .chains
         .values()
         .map(|e| {
-            let (thought_count, agent_count) = MentisDb::open_with_storage(
-                e.storage_adapter
-                    .for_chain_key(&config.service.chain_dir, &e.chain_key),
-            )
-            .map(|chain| {
-                (
-                    chain.thoughts().len() as u64,
-                    chain.agent_registry().agents.len(),
-                )
-            })
-            .unwrap_or((e.thought_count, e.agent_count));
             vec![
                 e.chain_key.clone(),
                 e.version.to_string(),
                 e.storage_adapter.to_string(),
-                thought_count.to_string(),
-                agent_count.to_string(),
+                e.thought_count.to_string(),
+                e.agent_count.to_string(),
                 e.storage_location.clone(),
             ]
         })

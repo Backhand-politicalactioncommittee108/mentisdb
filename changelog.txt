@@ -1,3 +1,45 @@
+0.5.2.11 Mar/22/2026
+ - feat: Reframe ThoughtType
+   - New `ThoughtType::Reframe` variant for reframing thoughts that were accurate but unhelpfully framed
+   - Distinct from Correction (factually wrong) and Invalidates (correct but stale)
+   - Added to Corrections section in `to_memory_markdown` output
+   - Sound signature: E5→D5→B4 gentle falling pattern in mentisdbd
+   - Added to dashboard TYPE_GROUPS (Correction/red group)
+ - feat: Supersedes ThoughtRelationKind
+   - New `ThoughtRelationKind::Supersedes` variant for typed semantic "this replaces that" edges
+   - Complements Reframe: use Reframe as ThoughtType, Supersedes as RelationKind pointing to the old thought
+ - feat: cross-chain thought references
+   - `ThoughtRelation` now has an optional `chain_key: Option<String>` field
+   - Intra-chain refs remain backward-compatible (chain_key = None, skipped in JSON)
+   - Binary (bincode) serialization always includes all 3 fields; JSON omits chain_key when None
+   - Legacy v0 chains without chain_key are migrated transparently via LegacyThoughtRelation
+   - New `ThoughtInput::with_cross_chain_relation()` builder method
+ - feat: schema V2
+   - `MENTISDB_SCHEMA_V2 = 2` constant added; `MENTISDB_CURRENT_VERSION` bumped to V2
+   - Registry version is normalized to current version on load
+ - feat: bulk import from MEMORY.md format
+   - New `MentisDb::import_from_memory_markdown(markdown, default_agent_id)` library method
+   - Parses all 29 ThoughtType variants, ThoughtRole, importance, confidence, tags from bullet lines
+   - Source `[#N]` indices are discarded; thoughts are re-appended in order on the target chain
+   - New REST endpoint: `POST /v1/import-markdown` (+ legacy alias `thoughtchain_import_memory_markdown`)
+   - New MCP tool: `mentisdb_import_memory_markdown`
+   - New dashboard endpoint: `POST /dashboard/api/chains/{chain_key}/import-markdown`
+   - Tests: round-trip export→import, default agent fallback, malformed-line skipping
+   - Benchmark: `bench_import_memory_markdown` (100-thought bulk import)
+ - feat(dashboard): refs and relations in thought detail modal
+   - Positional refs (intra-chain indices) displayed as #N, #M list
+   - Typed relations displayed as `kind → target_id (chain: other-chain)` with chain_key omitted when intra-chain
+ - feat(dashboard): Import MEMORY.md button on chain detail page
+   - "📥 Import MEMORY.md" button opens a modal with textarea + default_agent_id input
+   - Calls `POST /dashboard/api/chains/{chain_key}/import-markdown`, shows imported count on success
+ - docs(skill): MENTISDB_SKILL.md updated for 0.5.2
+   - Reframe ThoughtType entry with when-to-use guidance
+   - Back-referencing section: how to use refs and relations on LessonLearned, Correction, and Reframe thoughts
+   - Supersedes vs Corrects vs Invalidates decision guide
+   - Cross-chain references section with examples
+   - Example: Reframe superseding an overly broad constraint (bad/good patterns)
+ - chore: bump crate version to 0.5.2
+
 0.5.1.10 MAR/22/2026
  - feat(dashboard): copy agent memories to another chain
    - New "📋 Copy to Chain…" button on the Agent detail page (next to "Export Memory…")

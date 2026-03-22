@@ -194,6 +194,39 @@ fn query_filters_by_type_tag_and_text() {
 }
 
 #[test]
+fn query_filters_by_partial_tag_and_concept_matches() {
+    let dir = unique_chain_dir();
+    let mut chain = MentisDb::open_with_key(&dir, "query-tag-concept-substrings").unwrap();
+
+    chain
+        .append_thought(
+            "astro",
+            ThoughtInput::new(ThoughtType::Insight, "Keep durable storage append-only.")
+                .with_tags(["durability", "storage"])
+                .with_concepts(["search traversal"]),
+        )
+        .unwrap();
+    chain
+        .append_thought(
+            "astro",
+            ThoughtInput::new(ThoughtType::Decision, "Defer vector indexing.")
+                .with_tags(["retrieval"])
+                .with_concepts(["ranking"]),
+        )
+        .unwrap();
+
+    let results = chain.query(
+        &ThoughtQuery::new()
+            .with_tags_any(["durab"])
+            .with_concepts_any(["traver"]),
+    );
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].content, "Keep durable storage append-only.");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn query_filters_retrospectives_and_lesson_learned() {
     let dir = unique_chain_dir();
     let mut chain = MentisDb::open_with_key(&dir, "shared-project").unwrap();
@@ -596,6 +629,73 @@ fn traverse_thoughts_filters_by_agent_type_role_and_time_window() {
             "matching astro checkpoint",
             "second matching astro checkpoint"
         ]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn traverse_thoughts_filters_by_tag_and_concept_in_indexed_order() {
+    let dir = unique_chain_dir();
+    let mut chain = MentisDb::open_with_key(&dir, "traverse-tag-concept").unwrap();
+
+    append_test_thought(
+        &mut chain,
+        "astro",
+        ThoughtType::Insight,
+        ThoughtRole::Memory,
+        "non-matching anchor",
+    );
+    chain
+        .append_thought(
+            "astro",
+            ThoughtInput::new(ThoughtType::Decision, "first indexed match")
+                .with_role(ThoughtRole::Checkpoint)
+                .with_tags(["durability"])
+                .with_concepts(["search traversal"]),
+        )
+        .unwrap();
+    chain
+        .append_thought(
+            "astro",
+            ThoughtInput::new(ThoughtType::Decision, "second indexed match")
+                .with_role(ThoughtRole::Checkpoint)
+                .with_tags(["durable"])
+                .with_concepts(["traversal tuning"]),
+        )
+        .unwrap();
+    chain
+        .append_thought(
+            "astro",
+            ThoughtInput::new(ThoughtType::Decision, "non-matching tail")
+                .with_role(ThoughtRole::Checkpoint)
+                .with_tags(["retrieval"])
+                .with_concepts(["ranking"]),
+        )
+        .unwrap();
+
+    let page = chain
+        .traverse_thoughts(&ThoughtTraversalRequest {
+            anchor: ThoughtTraversalAnchor::Genesis,
+            direction: ThoughtTraversalDirection::Forward,
+            include_anchor: false,
+            chunk_size: 1,
+            filter: ThoughtQuery::new()
+                .with_tags_any(["durab"])
+                .with_concepts_any(["traver"]),
+        })
+        .unwrap();
+
+    assert_eq!(page.thoughts.len(), 1);
+    assert_eq!(page.thoughts[0].content, "first indexed match");
+    assert!(page.has_more);
+    assert_eq!(
+        page.next_cursor.as_ref().map(|cursor| cursor.index),
+        Some(1)
+    );
+    assert_eq!(
+        page.previous_cursor.as_ref().map(|cursor| cursor.index),
+        Some(1)
     );
 
     let _ = std::fs::remove_dir_all(&dir);

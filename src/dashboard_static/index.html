@@ -354,6 +354,33 @@
     </div>
   </div>
 
+  <!-- Agent Memory Export Modal -->
+  <div id="mem-export-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:2000;overflow-y:auto;padding:24px 16px">
+    <div style="max-width:760px;margin:0 auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:24px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+        <h3 style="margin:0;color:#e6edf3">📄 Export Agent Memory</h3>
+        <button id="mem-export-close" style="background:none;border:none;color:#8b949e;font-size:1.4rem;cursor:pointer;line-height:1">&times;</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+        <label style="color:#8b949e;font-size:0.88rem;white-space:nowrap">Chain:</label>
+        <select id="mem-export-chain" style="background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:5px 10px;font-size:0.88rem"></select>
+        <button id="mem-export-generate" class="btn btn-primary btn-sm">Generate</button>
+        <span id="mem-export-fb" class="feedback"></span>
+      </div>
+      <div id="mem-export-content" style="display:none">
+        <textarea id="mem-export-text" readonly
+          style="width:100%;box-sizing:border-box;height:400px;background:#0d1117;color:#c9d1d9;
+                 border:1px solid #30363d;border-radius:6px;padding:12px;font-family:monospace;
+                 font-size:0.82rem;resize:vertical;line-height:1.5"></textarea>
+        <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+          <button id="mem-export-copy" class="btn btn-secondary btn-sm">⎘ Copy</button>
+          <button id="mem-export-save" class="btn btn-primary btn-sm">⬇ Save As…</button>
+          <span id="mem-export-copy-fb" class="feedback"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script>
   // =====================================================================
   // CONSTANTS
@@ -1006,7 +1033,10 @@
       <div class="card" style="margin-top:0">
         <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
           <span>Recent Thoughts</span>
-          <a class="btn btn-secondary btn-sm" href="#agent-thoughts/${encodeURIComponent(chainKey)}/${encodeURIComponent(agentId)}">All ${esc(agent.display_name || agentId)}'s thoughts on ${esc(chainKey)} →</a>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-secondary btn-sm" id="ad-export-btn">📄 Export Memory…</button>
+            <a class="btn btn-secondary btn-sm" href="#agent-thoughts/${encodeURIComponent(chainKey)}/${encodeURIComponent(agentId)}">All ${esc(agent.display_name || agentId)}'s thoughts on ${esc(chainKey)} →</a>
+          </div>
         </div>
         <div id="ad-thoughts-chains" style="margin-bottom:10px"></div>
         <div id="ad-thoughts"><div class="spinner-wrap"><div class="spinner"></div></div></div>
@@ -1094,6 +1124,11 @@
 
     wireKeyDelete(chainKey, agentId);
 
+    // ── Export Memory dialog ──────────────────────────────────────────────
+    document.getElementById('ad-export-btn').addEventListener('click', () => {
+      openMemoryExportModal(agentId, agent.display_name || agentId, chainKey);
+    });
+
     // Cross-chain links: find all chains where this agent appears
     const displayName = agent.display_name || agentId;
     api('/dashboard/api/agents')
@@ -1145,6 +1180,107 @@
         if (tEl) errBox(tEl, err.message);
       });
   }
+
+  // =====================================================================
+  // AGENT MEMORY EXPORT
+  // =====================================================================
+  (function() {
+    const overlay  = document.getElementById('mem-export-overlay');
+    const closeBtn = document.getElementById('mem-export-close');
+    const chainSel = document.getElementById('mem-export-chain');
+    const genBtn   = document.getElementById('mem-export-generate');
+    const fb       = document.getElementById('mem-export-fb');
+    const content  = document.getElementById('mem-export-content');
+    const textarea = document.getElementById('mem-export-text');
+    const copyBtn  = document.getElementById('mem-export-copy');
+    const saveBtn  = document.getElementById('mem-export-save');
+    const copyFb   = document.getElementById('mem-export-copy-fb');
+
+    let _agentId   = null;
+    let _filename  = null;
+
+    closeBtn.addEventListener('click', () => { overlay.style.display = 'none'; });
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.style.display = 'none'; });
+
+    genBtn.addEventListener('click', () => {
+      const ck = chainSel.value;
+      if (!ck || !_agentId) return;
+      fb.textContent = '';
+      genBtn.disabled = true;
+      genBtn.textContent = 'Generating…';
+      content.style.display = 'none';
+      api(`/dashboard/api/agents/${encodeURIComponent(ck)}/${encodeURIComponent(_agentId)}/memory-markdown`)
+        .then(d => {
+          textarea.value = d.markdown || '';
+          _filename = d.filename || `${_agentId}_${ck}_AGENT.md`;
+          content.style.display = '';
+          saveBtn.dataset.filename = _filename;
+        })
+        .catch(err => { fb.textContent = err.message; fb.style.color = '#f85149'; })
+        .finally(() => { genBtn.disabled = false; genBtn.textContent = 'Generate'; });
+    });
+
+    copyBtn.addEventListener('click', () => {
+      if (!textarea.value) return;
+      navigator.clipboard.writeText(textarea.value).then(() => {
+        copyFb.textContent = '✓ Copied!'; copyFb.style.color = '#3fb950';
+        setTimeout(() => { copyFb.textContent = ''; }, 2000);
+      }).catch(() => {
+        textarea.select();
+        document.execCommand('copy');
+        copyFb.textContent = '✓ Copied!'; copyFb.style.color = '#3fb950';
+        setTimeout(() => { copyFb.textContent = ''; }, 2000);
+      });
+    });
+
+    saveBtn.addEventListener('click', () => {
+      if (!textarea.value) return;
+      const blob = new Blob([textarea.value], { type: 'text/markdown;charset=utf-8' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = _filename || 'agent_AGENT.md';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    });
+
+    window.openMemoryExportModal = function(agentId, displayName, currentChainKey) {
+      _agentId  = agentId;
+      _filename = null;
+      fb.textContent = '';
+      content.style.display = 'none';
+      textarea.value = '';
+      genBtn.textContent = 'Generate';
+
+      // Populate chain dropdown from all chains where this agent appears.
+      chainSel.innerHTML = '';
+      api('/dashboard/api/agents')
+        .then(allByChain => {
+          const chains = Object.keys(allByChain)
+            .filter(ck => (allByChain[ck] || []).some(a => a.agent_id === agentId || a.id === agentId));
+          // Always include the current chain even if it wasn't in the all-agents response.
+          if (!chains.includes(currentChainKey)) chains.unshift(currentChainKey);
+          chains.forEach(ck => {
+            const opt = document.createElement('option');
+            opt.value = ck;
+            opt.textContent = ck;
+            if (ck === currentChainKey) opt.selected = true;
+            chainSel.appendChild(opt);
+          });
+        })
+        .catch(() => {
+          const opt = document.createElement('option');
+          opt.value = currentChainKey;
+          opt.textContent = currentChainKey;
+          opt.selected = true;
+          chainSel.appendChild(opt);
+        });
+
+      overlay.style.display = '';
+    };
+  })();
 
   async function renderAgentThoughts(chainKey, agentId) {
     updateNav();

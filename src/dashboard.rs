@@ -18,8 +18,8 @@
 
 use crate::{
     deregister_chain, load_registered_chains, AgentStatus, MentisDb, PublicKeyAlgorithm,
-    SkillFormat, SkillRegistry, StorageAdapterKind, Thought, ThoughtInput, ThoughtRole,
-    ThoughtType,
+    SkillFormat, SkillRegistry, StorageAdapterKind, Thought, ThoughtInput, ThoughtQuery,
+    ThoughtRole, ThoughtType,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -32,7 +32,7 @@ use axum::{
 use dashmap::DashMap;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -121,6 +121,11 @@ pub(crate) fn dashboard_router(state: DashboardState) -> Router {
         .route(
             "/agents/{chain_key}/{agent_id}/keys/{key_id}",
             delete(api_delete_agent_key),
+        )
+        // Agent memory export
+        .route(
+            "/agents/{chain_key}/{agent_id}/memory-markdown",
+            get(api_agent_memory_markdown),
         )
         // Skill listing and reading
         .route("/skills", get(api_skills))
@@ -350,26 +355,47 @@ fn parse_thought_type(s: &str) -> Option<ThoughtType> {
 /// Serialise a page of thoughts alongside pagination metadata.
 ///
 /// When `reverse` is `true` the slice is returned newest-first (descending by
-/// append index). Pagination is applied *after* reversing so that page 1 is
-/// always the logical "first" page in the chosen order.
-fn paginated_thoughts(
-    mut thoughts: Vec<&Thought>,
+/// append index). Pagination is applied in streaming order so the full filtered
+/// result set does not need to be reversed or materialized up front.
+fn paginated_thoughts<F>(
+    thoughts: &[Thought],
     page: usize,
     per_page: usize,
     reverse: bool,
-) -> Value {
-    if reverse {
-        thoughts.reverse();
-    }
-    let total = thoughts.len();
-    let pages = if per_page == 0 {
-        0
-    } else {
-        total.div_ceil(per_page)
-    };
+    mut predicate: F,
+) -> Value
+where
+    F: FnMut(&Thought) -> bool,
+{
+    let page = page.max(1);
+    let per_page = per_page.max(1);
+    let start = (page.saturating_sub(1)).saturating_mul(per_page);
+    let mut total = 0usize;
+    let mut slice = Vec::with_capacity(per_page);
 
-    let start = ((page.saturating_sub(1)) * per_page).min(total);
-    let slice: Vec<&Thought> = thoughts.into_iter().skip(start).take(per_page).collect();
+    if reverse {
+        for thought in thoughts.iter().rev() {
+            if !predicate(thought) {
+                continue;
+            }
+            if total >= start && slice.len() < per_page {
+                slice.push(thought);
+            }
+            total += 1;
+        }
+    } else {
+        for thought in thoughts {
+            if !predicate(thought) {
+                continue;
+            }
+            if total >= start && slice.len() < per_page {
+                slice.push(thought);
+            }
+            total += 1;
+        }
+    }
+
+    let pages = total.div_ceil(per_page);
 
     json!({
         "thoughts": slice,
@@ -378,6 +404,14 @@ fn paginated_thoughts(
         "per_page": per_page,
         "pages": pages,
     })
+}
+
+fn thought_counts_by_agent<'a>(thoughts: &'a [Thought]) -> HashMap<&'a str, u64> {
+    let mut counts = HashMap::new();
+    for thought in thoughts {
+        *counts.entry(thought.agent_id.as_str()).or_insert(0) += 1;
+    }
+    counts
 }
 
 // ── Query parameter structs ───────────────────────────────────────────────────
@@ -525,22 +559,22 @@ async fn api_chain_thoughts(
         .as_deref()
         .map(|raw| raw.split(',').filter_map(parse_thought_type).collect());
 
-    let thoughts: Vec<&Thought> = chain
-        .thoughts()
-        .iter()
-        .filter(|t| {
-            type_filter
-                .as_ref()
-                .map(|types| types.contains(&t.thought_type))
-                .unwrap_or(true)
-        })
-        .collect();
-
     let page = params.page.unwrap_or(1).max(1);
     let per_page = params.per_page.unwrap_or(50).max(1);
     let reverse = params.order.as_deref().unwrap_or("desc") != "asc";
 
-    Ok(Json(paginated_thoughts(thoughts, page, per_page, reverse)))
+    Ok(Json(paginated_thoughts(
+        chain.thoughts(),
+        page,
+        per_page,
+        reverse,
+        |t| {
+            type_filter
+                .as_ref()
+                .map(|types| types.contains(&t.thought_type))
+                .unwrap_or(true)
+        },
+    )))
 }
 
 /// `GET /dashboard/api/thoughts/:chain_key/:thought_id`
@@ -560,15 +594,11 @@ async fn api_get_thought(
     let arc = get_or_open_chain(&state, &chain_key).await?;
     let chain = arc.read().await;
 
-    let thought = chain
-        .thoughts()
-        .iter()
-        .find(|t| t.id == thought_id)
-        .ok_or_else(|| {
-            not_found(format!(
-                "thought '{thought_id}' not found in chain '{chain_key}'"
-            ))
-        })?;
+    let thought = chain.get_thought_by_id(thought_id).ok_or_else(|| {
+        not_found(format!(
+            "thought '{thought_id}' not found in chain '{chain_key}'"
+        ))
+    })?;
 
     Ok(Json(serde_json::to_value(thought).map_err(internal_error)?))
 }
@@ -589,23 +619,23 @@ async fn api_agent_thoughts(
         .as_deref()
         .map(|raw| raw.split(',').filter_map(parse_thought_type).collect());
 
-    let thoughts: Vec<&Thought> = chain
-        .thoughts()
-        .iter()
-        .filter(|t| {
+    let page = params.page.unwrap_or(1).max(1);
+    let per_page = params.per_page.unwrap_or(50).max(1);
+    let reverse = params.order.as_deref().unwrap_or("desc") != "asc";
+
+    Ok(Json(paginated_thoughts(
+        chain.thoughts(),
+        page,
+        per_page,
+        reverse,
+        |t| {
             t.agent_id == agent_id
                 && type_filter
                     .as_ref()
                     .map(|types| types.contains(&t.thought_type))
                     .unwrap_or(true)
-        })
-        .collect();
-
-    let page = params.page.unwrap_or(1).max(1);
-    let per_page = params.per_page.unwrap_or(50).max(1);
-    let reverse = params.order.as_deref().unwrap_or("desc") != "asc";
-
-    Ok(Json(paginated_thoughts(thoughts, page, per_page, reverse)))
+        },
+    )))
 }
 
 // ── API: agents ───────────────────────────────────────────────────────────────
@@ -625,13 +655,16 @@ async fn api_agents_all(
             Ok(arc) => {
                 let chain = arc.read().await;
                 let thoughts = chain.thoughts();
+                let thought_counts = thought_counts_by_agent(thoughts);
                 let agents: Vec<Value> = chain
                     .agent_registry()
                     .agents
                     .values()
                     .map(|a| {
-                        let live_count =
-                            thoughts.iter().filter(|t| t.agent_id == a.agent_id).count() as u64;
+                        let live_count = thought_counts
+                            .get(a.agent_id.as_str())
+                            .copied()
+                            .unwrap_or(0);
                         let mut v = serde_json::to_value(a).unwrap_or(Value::Null);
                         if let Value::Object(ref mut m) = v {
                             m.insert("thought_count".to_string(), live_count.into());
@@ -660,12 +693,16 @@ async fn api_agents_by_chain(
     let arc = get_or_open_chain(&state, &chain_key).await?;
     let chain = arc.read().await;
     let thoughts = chain.thoughts();
+    let thought_counts = thought_counts_by_agent(thoughts);
     let agents: Vec<Value> = chain
         .agent_registry()
         .agents
         .values()
         .map(|a| {
-            let live_count = thoughts.iter().filter(|t| t.agent_id == a.agent_id).count() as u64;
+            let live_count = thought_counts
+                .get(a.agent_id.as_str())
+                .copied()
+                .unwrap_or(0);
             let mut v = serde_json::to_value(a).unwrap_or(Value::Null);
             if let Value::Object(ref mut m) = v {
                 m.insert("thought_count".to_string(), live_count.into());
@@ -694,11 +731,8 @@ async fn api_get_agent(
                 "agent '{agent_id}' not found in chain '{chain_key}'"
             ))
         })?;
-    let live_count = chain
-        .thoughts()
-        .iter()
-        .filter(|t| t.agent_id == agent_id)
-        .count() as u64;
+    let thought_counts = thought_counts_by_agent(chain.thoughts());
+    let live_count = thought_counts.get(agent_id.as_str()).copied().unwrap_or(0);
     let mut v = serde_json::to_value(agent).map_err(internal_error)?;
     if let Value::Object(ref mut m) = v {
         m.insert("thought_count".to_string(), live_count.into());
@@ -952,4 +986,32 @@ async fn api_deprecate_skill(
 /// Returns the crate version baked in at compile time.
 async fn api_version() -> Json<Value> {
     Json(json!({ "version": env!("CARGO_PKG_VERSION") }))
+}
+
+/// `GET /dashboard/api/agents/{chain_key}/{agent_id}/memory-markdown`
+///
+/// Exports all thoughts attributed to `agent_id` on `chain_key` as a
+/// `MEMORY.md`-style Markdown document. The response includes the rendered
+/// markdown and a suggested filename for "Save As" download.
+async fn api_agent_memory_markdown(
+    State(state): State<DashboardState>,
+    Path((chain_key, agent_id)): Path<(String, String)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let arc = get_or_open_chain(&state, &chain_key).await?;
+    let chain = arc.read().await;
+
+    // Filter all thoughts to only this agent's contributions.
+    let query = ThoughtQuery::new().with_agent_ids([agent_id.as_str()]);
+    let markdown = chain.to_memory_markdown(Some(&query));
+
+    // Build a filesystem-safe suggested filename:
+    //   <agent_id>_<chain_key>_AGENT.md  (spaces → underscores, lowercased)
+    let safe = |s: &str| {
+        s.chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '_' })
+            .collect::<String>()
+    };
+    let filename = format!("{}_{}_AGENT.md", safe(&agent_id), safe(&chain_key));
+
+    Ok(Json(json!({ "markdown": markdown, "filename": filename })))
 }

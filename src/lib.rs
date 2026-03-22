@@ -1613,6 +1613,28 @@ impl ThoughtQuery {
             }
         }
 
+        if !self.tags_any.is_empty()
+            && !self
+                .tags_any
+                .iter()
+                .any(|tag| contains_case_insensitive(&thought.tags, tag))
+        {
+            return false;
+        }
+
+        if !self.concepts_any.is_empty()
+            && !self
+                .concepts_any
+                .iter()
+                .any(|concept| contains_case_insensitive(&thought.concepts, concept))
+        {
+            return false;
+        }
+
+        self.matches_post_index_filters(thought)
+    }
+
+    fn matches_post_index_filters(&self, thought: &Thought) -> bool {
         if let Some(min_importance) = self.min_importance {
             if thought.importance < min_importance {
                 return false;
@@ -1636,24 +1658,6 @@ impl ThoughtQuery {
             if thought.timestamp > until {
                 return false;
             }
-        }
-
-        if !self.tags_any.is_empty()
-            && !self
-                .tags_any
-                .iter()
-                .any(|tag| contains_case_insensitive(&thought.tags, tag))
-        {
-            return false;
-        }
-
-        if !self.concepts_any.is_empty()
-            && !self
-                .concepts_any
-                .iter()
-                .any(|concept| contains_case_insensitive(&thought.concepts, concept))
-        {
-            return false;
         }
 
         true
@@ -1850,6 +1854,8 @@ struct QueryIndexes {
     by_agent_id: HashMap<String, Vec<usize>>,
     by_thought_type: HashMap<ThoughtType, Vec<usize>>,
     by_role: HashMap<ThoughtRole, Vec<usize>>,
+    by_tag: HashMap<String, Vec<usize>>,
+    by_concept: HashMap<String, Vec<usize>>,
 }
 
 impl QueryIndexes {
@@ -1871,6 +1877,18 @@ impl QueryIndexes {
             .or_default()
             .push(position);
         self.by_role.entry(thought.role).or_default().push(position);
+        for tag in &thought.tags {
+            self.by_tag
+                .entry(tag.to_lowercase())
+                .or_default()
+                .push(position);
+        }
+        for concept in &thought.concepts {
+            self.by_concept
+                .entry(concept.to_lowercase())
+                .or_default()
+                .push(position);
+        }
     }
 }
 
@@ -2381,23 +2399,33 @@ impl MentisDb {
 
         let mut filter = request.filter.clone();
         filter.limit = None;
-
-        let mut positions = Vec::new();
-        let mut current = if request.include_anchor {
-            Some(anchor_position)
-        } else {
-            self.step_position(anchor_position, request.direction)
-        };
-
-        while let Some(position) = current {
-            let thought = &self.thoughts[position];
-            if self.thought_matches_query(thought, &filter) {
-                positions.push(position);
-                if positions.len() == request.chunk_size {
-                    break;
-                }
-            }
-            current = self.step_position(position, request.direction);
+        let (start, end) = filter.candidate_position_bounds(&self.thoughts);
+        let mut positions =
+            if let Some(candidate_positions) = self.indexed_candidate_positions(&filter) {
+                let bounded_positions: Vec<usize> = candidate_positions
+                    .into_iter()
+                    .filter(|position| *position >= start && *position < end)
+                    .collect();
+                self.collect_traversal_matches_from_candidates(
+                    &bounded_positions,
+                    anchor_position,
+                    request.direction,
+                    request.include_anchor,
+                    request.chunk_size,
+                    &filter,
+                )
+            } else {
+                self.collect_traversal_matches_linear(
+                    anchor_position,
+                    request.direction,
+                    request.include_anchor,
+                    request.chunk_size,
+                    &filter,
+                )
+            };
+        let has_more = positions.len() > request.chunk_size;
+        if has_more {
+            positions.pop();
         }
 
         let thoughts = positions
@@ -2405,21 +2433,16 @@ impl MentisDb {
             .map(|&position| &self.thoughts[position])
             .collect::<Vec<_>>();
 
-        let (has_more, next_cursor, previous_cursor) =
-            if let (Some(first_position), Some(last_position)) =
-                (positions.first().copied(), positions.last().copied())
-            {
-                let has_more = self
-                    .find_matching_position_from(last_position, request.direction, false, &filter)
-                    .is_some();
-                (
-                    has_more,
-                    Some(ThoughtTraversalCursor::from(&self.thoughts[last_position])),
-                    Some(ThoughtTraversalCursor::from(&self.thoughts[first_position])),
-                )
-            } else {
-                (false, None, None)
-            };
+        let (next_cursor, previous_cursor) = if let (Some(first_position), Some(last_position)) =
+            (positions.first().copied(), positions.last().copied())
+        {
+            (
+                Some(ThoughtTraversalCursor::from(&self.thoughts[last_position])),
+                Some(ThoughtTraversalCursor::from(&self.thoughts[first_position])),
+            )
+        } else {
+            (None, None)
+        };
 
         Ok(ThoughtTraversalPage {
             anchor,
@@ -2673,6 +2696,10 @@ impl MentisDb {
         query.matches(thought) && self.query_matches_registry(thought, query)
     }
 
+    fn thought_matches_indexed_query(&self, thought: &Thought, query: &ThoughtQuery) -> bool {
+        query.matches_post_index_filters(thought) && self.query_matches_registry(thought, query)
+    }
+
     fn resolve_traversal_anchor_position(
         &self,
         request: &ThoughtTraversalRequest,
@@ -2710,28 +2737,80 @@ impl MentisDb {
         }
     }
 
-    fn find_matching_position_from(
+    fn collect_traversal_matches_linear(
         &self,
-        position: usize,
+        anchor_position: usize,
         direction: ThoughtTraversalDirection,
         include_anchor: bool,
+        chunk_size: usize,
         query: &ThoughtQuery,
-    ) -> Option<usize> {
+    ) -> Vec<usize> {
+        let mut matches = Vec::with_capacity(chunk_size.saturating_add(1));
         let mut current = if include_anchor {
-            Some(position)
+            Some(anchor_position)
         } else {
-            self.step_position(position, direction)
+            self.step_position(anchor_position, direction)
         };
 
         while let Some(candidate) = current {
             let thought = &self.thoughts[candidate];
             if self.thought_matches_query(thought, query) {
-                return Some(candidate);
+                matches.push(candidate);
+                if matches.len() > chunk_size {
+                    break;
+                }
             }
             current = self.step_position(candidate, direction);
         }
 
-        None
+        matches
+    }
+
+    fn collect_traversal_matches_from_candidates(
+        &self,
+        candidates: &[usize],
+        anchor_position: usize,
+        direction: ThoughtTraversalDirection,
+        include_anchor: bool,
+        chunk_size: usize,
+        query: &ThoughtQuery,
+    ) -> Vec<usize> {
+        let mut matches = Vec::with_capacity(chunk_size.saturating_add(1));
+
+        match direction {
+            ThoughtTraversalDirection::Forward => {
+                let start_index = match candidates.binary_search(&anchor_position) {
+                    Ok(index) if include_anchor => index,
+                    Ok(index) => index + 1,
+                    Err(index) => index,
+                };
+                for &candidate in candidates.iter().skip(start_index) {
+                    if self.thought_matches_indexed_query(&self.thoughts[candidate], query) {
+                        matches.push(candidate);
+                        if matches.len() > chunk_size {
+                            break;
+                        }
+                    }
+                }
+            }
+            ThoughtTraversalDirection::Backward => {
+                let end_index = match candidates.binary_search(&anchor_position) {
+                    Ok(index) if include_anchor => index + 1,
+                    Ok(index) => index,
+                    Err(index) => index,
+                };
+                for &candidate in candidates[..end_index].iter().rev() {
+                    if self.thought_matches_indexed_query(&self.thoughts[candidate], query) {
+                        matches.push(candidate);
+                        if matches.len() > chunk_size {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        matches
     }
 
     /// Render a JSON representation of a thought with resolved agent metadata.
@@ -2783,6 +2862,7 @@ impl MentisDb {
         let (start, end) = query.candidate_position_bounds(&self.thoughts);
         let empty: &[Thought] = &[];
         let candidate_positions = self.indexed_candidate_positions(query);
+        let indexed_filters_applied = candidate_positions.is_some();
         let candidate_thoughts: Box<dyn Iterator<Item = &Thought> + '_> =
             if let Some(positions) = candidate_positions {
                 Box::new(
@@ -2801,7 +2881,14 @@ impl MentisDb {
             };
 
         let mut results: Vec<&Thought> = candidate_thoughts
-            .filter(|thought| query.matches(thought) && self.query_matches_registry(thought, query))
+            .filter(|thought| {
+                let thought_matches = if indexed_filters_applied {
+                    query.matches_post_index_filters(thought)
+                } else {
+                    query.matches(thought)
+                };
+                thought_matches && self.query_matches_registry(thought, query)
+            })
             .collect();
 
         if let Some(limit) = query.limit {
@@ -2835,6 +2922,20 @@ impl MentisDb {
                 agent_ids
                     .iter()
                     .filter_map(|agent_id| self.query_indexes.by_agent_id.get(agent_id)),
+            ));
+        }
+
+        if !query.tags_any.is_empty() {
+            filters.push(matching_index_positions(
+                &self.query_indexes.by_tag,
+                &query.tags_any,
+            ));
+        }
+
+        if !query.concepts_any.is_empty() {
+            filters.push(matching_index_positions(
+                &self.query_indexes.by_concept,
+                &query.concepts_any,
             ));
         }
 
@@ -4098,6 +4199,24 @@ where
     positions.sort_unstable();
     positions.dedup();
     positions
+}
+
+fn matching_index_positions(index: &HashMap<String, Vec<usize>>, needles: &[String]) -> Vec<usize> {
+    let normalized_needles: Vec<String> = needles
+        .iter()
+        .map(|needle| needle.trim().to_lowercase())
+        .filter(|needle| !needle.is_empty())
+        .collect();
+    if normalized_needles.is_empty() {
+        return Vec::new();
+    }
+
+    union_position_lists(index.iter().filter_map(|(value, positions)| {
+        normalized_needles
+            .iter()
+            .any(|needle| value.contains(needle))
+            .then_some(positions)
+    }))
 }
 
 fn intersect_sorted_positions(left: &[usize], right: &[usize]) -> Vec<usize> {

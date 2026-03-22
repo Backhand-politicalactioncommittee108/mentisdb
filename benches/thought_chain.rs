@@ -4,10 +4,11 @@
 //!
 //! - **`append_throughput`**: single-thought latency and batches of 10 / 100 / 1 000
 //!   thoughts, reporting elements-per-second throughput.
-//! - **`query_latency`**: type, text, and tag filters over a 1 000-thought chain,
-//!   exercising the index-backed query path.
+//! - **`query_latency`**: indexed (`thought_type`, `tag`) and linear-scan (`text`)
+//!   filters over a 1 000-thought chain.
 //! - **`traversal`**: forward and backward append-order traversal at chunk sizes
-//!   of 10 and 100 over a 500-thought chain.
+//!   of 10 and 100 over a 500-thought chain, plus a filtered no-match case
+//!   that exposes full-scan traversal behavior.
 
 use criterion::{
     black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
@@ -129,10 +130,11 @@ pub fn bench_append_batch(c: &mut Criterion) {
 
 /// Benchmark query filters over a pre-populated 1 000-thought chain.
 ///
-/// Three sub-benchmarks exercise different index-backed code paths:
+/// Four sub-benchmarks exercise indexed and linear-scan retrieval paths:
 /// - `query_by_type` hits the type index fast path.
 /// - `query_by_text` exercises the linear content-scan path.
-/// - `query_by_tag` hits the tag index fast path.
+/// - `query_by_tag` exercises the tag posting-list fast path.
+/// - `query_by_tag_miss` is a no-match tag lookup to expose miss-path overhead.
 ///
 /// The 1 000-thought chain is built once in setup and shared across all
 /// iterations; only the query call is inside the timing window.
@@ -164,9 +166,18 @@ pub fn query_latency(c: &mut Criterion) {
         });
     });
 
-    // Benchmark tag-index query.
+    // Benchmark tag-index lookup.
     group.bench_function("query_by_tag", |b| {
         let q = ThoughtQuery::new().with_tags_any(["bench-tag"]);
+        b.iter(|| {
+            let results = chain.query(black_box(&q));
+            black_box(results.len());
+        });
+    });
+
+    // Benchmark no-match tag lookup.
+    group.bench_function("query_by_tag_miss", |b| {
+        let q = ThoughtQuery::new().with_tags_any(["bench-tag-missing"]);
         b.iter(|| {
             let results = chain.query(black_box(&q));
             black_box(results.len());
@@ -186,6 +197,7 @@ pub fn query_latency(c: &mut Criterion) {
 /// - `traverse_forward_10`: 10 thoughts forward from genesis.
 /// - `traverse_forward_100`: 100 thoughts forward from genesis.
 /// - `traverse_backward_10`: 10 thoughts backward from head.
+/// - `traverse_filtered_miss_10`: filter-miss traversal that scans the full chain.
 ///
 /// The 500-thought chain is built once in setup; only the traversal call is
 /// inside the timing window.
@@ -243,6 +255,23 @@ pub fn traversal(c: &mut Criterion) {
             let page = chain
                 .traverse_thoughts(black_box(&req))
                 .expect("traverse_backward_10: traversal failed");
+            black_box(page.thoughts.len());
+        });
+    });
+
+    // Forward from genesis, filter that matches nothing (full-chain scan).
+    group.bench_function("traverse_filtered_miss_10", |b| {
+        let req = ThoughtTraversalRequest::new(
+            ThoughtTraversalAnchor::Genesis,
+            ThoughtTraversalDirection::Forward,
+            10,
+        )
+        .with_include_anchor(true)
+        .with_filter(ThoughtQuery::new().with_text("no-match-token"));
+        b.iter(|| {
+            let page = chain
+                .traverse_thoughts(black_box(&req))
+                .expect("traverse_filtered_miss_10: traversal failed");
             black_box(page.thoughts.len());
         });
     });

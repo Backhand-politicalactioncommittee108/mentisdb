@@ -1,3 +1,39 @@
+0.5.1.0 MAR/21/2026
+ - feat(dashboard): agent thoughts explorer
+   - Per-agent detail page now includes cross-chain links: "All <DisplayName>'s thoughts on <chain-key>" for every chain the agent participated in
+   - Clicking the link opens a filterable thought explorer pre-filtered to that agent's contributions
+   - `renderAgentThoughts(agentId, chainKey)` function added to the SPA; supports pagination and per-page controls
+ - feat(dashboard): skill revoke / deprecate with GitHub-style confirmation
+   - "Revoke Skill…" button in skill detail header triggers an overlay panel
+   - User must type the exact skill ID before "Revoke Forever" is enabled (mirrors GitHub repository deletion UX)
+   - New `POST /dashboard/api/skills/{skill_id}/revoke` and `POST /dashboard/api/skills/{skill_id}/deprecate` endpoints backed by `SkillRegistry::revoke_skill` and `deprecate_skill`
+ - feat(dashboard): version number in navigation header
+   - Brand now reads "🧠 MentisDB v0.5.1" — fetched from new `GET /dashboard/api/version` endpoint on page load
+   - New endpoint returns `{ "version": "…" }` compiled in via `env!("CARGO_PKG_VERSION")`
+ - feat(dashboard): chain list refresh button
+   - "↺ Refresh" button in the Chains page header re-fetches counts from the server without a full page reload
+ - fix(dashboard): `api_chains` now includes mid-session chains
+   - Result set is the union of disk-registry chain keys and chains live in the `Arc<DashMap>` cache
+   - Chains created mid-session via MCP (e.g. `foo-chain`) appear immediately without daemon restart
+ - fix(dashboard): agent thought counts were stale
+   - `api_agents_all`, `api_agents_by_chain`, and `api_get_agent` now compute thought counts live via `chain.thoughts().iter().filter(|t| t.agent_id == agent_id).count()` instead of reading the stored `AgentRecord.thought_count` field which can drift
+ - fix(dashboard): `renderAgentThoughts` used wrong element ID
+   - Function was targeting `document.getElementById('main')` but the SPA container is `<main id="app">`; corrected to `getElementById('app')`
+ - fix(dashboard): `setActive` JS error in agent thoughts view
+   - `renderAgentThoughts` was calling the non-existent `setActive('agents')` — replaced with the correct `updateNav()` call
+ - fix(dashboard): skill diff version picker shows sequential numbers
+   - `From` / `To` selectors now display `N: short-hash (date)` so the relative order of versions is unambiguous
+ - fix(dashboard): agent IDs in agents list are now clickable links
+   - Each agent ID cell in the agents table renders as `<a href="#agents/{id}">` to navigate directly to the agent detail page
+ - fix(startup): per-agent thought counts in startup report were stale
+   - `print_agent_registry_summary` now counts live via the same filtered-iterator pattern used by dashboard handlers
+ - fix: silence `DeviceSink` drop log from rodio 0.22
+   - Calling `.log_on_drop(false)` on the `DeviceSink` suppresses the "Dropping DeviceSink, audio playing through this sink will stop" message on daemon exit
+ - fix: resolve clippy errors in bench and tests
+   - `benches/http_concurrency.rs`: filled all missing `MentisDbServerConfig` fields in the struct literal
+   - `tests/mentisdb_tests.rs`: replaced four `vec![…]` array literals that hold only stack types with plain `[…]` arrays (`clippy::useless_vec`)
+ - chore: bump crate version to 0.5.1
+
 0.5.0.9 MAR/21/2026
  - feat: HTTPS/TLS support for mentisdbd
    - Added HTTPS listeners for both MCP (port 9473) and REST (port 9474) alongside existing HTTP listeners

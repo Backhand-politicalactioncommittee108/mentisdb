@@ -4,11 +4,18 @@
 //! on a dynamically assigned port (no external daemon required) and measures how
 //! many concurrent tokio tasks the server can serve for both write and read paths.
 //!
-//! Two benchmark suites are run back-to-back at **100 / 1 000 / 10 000** concurrent
-//! tokio tasks:
+//! Two benchmark suites are run back-to-back at configurable concurrency levels:
 //!
 //! - **Write wave** — each task appends one thought via `POST /v1/thoughts`.
 //! - **Read wave** — each task reads the chain head via `POST /v1/head`.
+//!
+//! By default this bench runs at **100 / 1 000** concurrent tasks so it remains
+//! usable on typical developer machines. Override with
+//! `MENTISDB_BENCH_CONCURRENCY`, for example:
+//!
+//! ```sh
+//! MENTISDB_BENCH_CONCURRENCY=100,1000,10000 cargo bench --bench http_concurrency
+//! ```
 //!
 //! Per-suite, the following metrics are reported:
 //!
@@ -34,6 +41,7 @@ use mentisdb::server::{start_servers, MentisDbServerConfig, MentisDbServiceConfi
 use mentisdb::StorageAdapterKind;
 use reqwest::Client;
 use serde_json::json;
+use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -49,8 +57,12 @@ const CHAIN_KEY: &str = "bench";
 /// Number of sequential warm-up appends performed before measurement begins.
 const WARMUP_COUNT: usize = 10;
 
-/// Concurrency levels (number of parallel tokio tasks) exercised in each wave.
-const CONCURRENCY_LEVELS: &[usize] = &[100, 1_000, 10_000];
+/// Default concurrency levels exercised in each wave.
+///
+/// Keep defaults moderate so local runs complete in practical time; use
+/// `MENTISDB_BENCH_CONCURRENCY` to opt into larger stress levels.
+const DEFAULT_CONCURRENCY_LEVELS: &[usize] = &[100, 1_000];
+const CONCURRENCY_LEVELS_ENV: &str = "MENTISDB_BENCH_CONCURRENCY";
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -62,6 +74,9 @@ const CONCURRENCY_LEVELS: &[usize] = &[100, 1_000, 10_000];
 /// configured concurrency level, and finally prints the result tables.
 #[tokio::main]
 async fn main() {
+    let concurrency_levels = resolve_concurrency_levels();
+    eprintln!("concurrency levels: {concurrency_levels:?}");
+
     // Keep TempDir alive for the entire benchmark so the chain files on disk
     // are not cleaned up before the server finishes.
     let temp_dir = TempDir::new().expect("failed to create temporary benchmark directory");
@@ -107,7 +122,7 @@ async fn main() {
 
     // Write wave ---------------------------------------------------------------
     let mut write_rows: Vec<(usize, BenchRow)> = Vec::new();
-    for &n in CONCURRENCY_LEVELS {
+    for &n in &concurrency_levels {
         eprintln!("write wave  n={n}…");
         let row = run_write_wave(Arc::clone(&client), Arc::clone(&rest_base), n).await;
         write_rows.push((n, row));
@@ -115,7 +130,7 @@ async fn main() {
 
     // Read wave ----------------------------------------------------------------
     let mut read_rows: Vec<(usize, BenchRow)> = Vec::new();
-    for &n in CONCURRENCY_LEVELS {
+    for &n in &concurrency_levels {
         eprintln!("read wave   n={n}…");
         let row = run_read_wave(Arc::clone(&client), Arc::clone(&rest_base), n).await;
         read_rows.push((n, row));
@@ -130,6 +145,46 @@ async fn main() {
 // ---------------------------------------------------------------------------
 // Benchmark rows
 // ---------------------------------------------------------------------------
+
+/// Resolve concurrency levels from `MENTISDB_BENCH_CONCURRENCY` or fall back to
+/// [`DEFAULT_CONCURRENCY_LEVELS`].
+///
+/// Expected env format is a comma-separated list of positive integers, such as
+/// `"100,1000,10000"`. Invalid input falls back to defaults with a warning.
+fn resolve_concurrency_levels() -> Vec<usize> {
+    let Ok(raw) = env::var(CONCURRENCY_LEVELS_ENV) else {
+        return DEFAULT_CONCURRENCY_LEVELS.to_vec();
+    };
+    let mut parsed = Vec::new();
+    for token in raw.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let Ok(level) = token.parse::<usize>() else {
+            eprintln!(
+                "invalid {CONCURRENCY_LEVELS_ENV} value '{raw}', using defaults {DEFAULT_CONCURRENCY_LEVELS:?}"
+            );
+            return DEFAULT_CONCURRENCY_LEVELS.to_vec();
+        };
+        if level == 0 {
+            eprintln!(
+                "invalid {CONCURRENCY_LEVELS_ENV} value '{raw}', levels must be > 0; using defaults {DEFAULT_CONCURRENCY_LEVELS:?}"
+            );
+            return DEFAULT_CONCURRENCY_LEVELS.to_vec();
+        }
+        parsed.push(level);
+    }
+    if parsed.is_empty() {
+        eprintln!(
+            "{CONCURRENCY_LEVELS_ENV} was set but empty, using defaults {DEFAULT_CONCURRENCY_LEVELS:?}"
+        );
+        return DEFAULT_CONCURRENCY_LEVELS.to_vec();
+    }
+    parsed.sort_unstable();
+    parsed.dedup();
+    parsed
+}
 
 /// Aggregated benchmark result for one concurrency level.
 #[derive(Debug)]

@@ -381,6 +381,38 @@
     </div>
   </div>
 
+  <!-- Copy Agent to Chain Modal -->
+  <div id="copy-chain-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:2000;overflow-y:auto;padding:24px 16px">
+    <div style="max-width:540px;margin:0 auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:24px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+        <h3 style="margin:0;color:#e6edf3">📋 Copy Agent to Chain</h3>
+        <button id="copy-chain-close" style="background:none;border:none;color:#8b949e;font-size:1.4rem;cursor:pointer;line-height:1">&times;</button>
+      </div>
+      <p id="copy-chain-desc" style="color:#8b949e;font-size:0.88rem;margin:0 0 16px"></p>
+      <div id="copy-chain-no-targets" style="display:none;color:#f0883e;font-size:0.88rem;margin-bottom:16px">
+        ⚠️ This agent already exists on every other known chain, or no other chains exist. Nothing to copy to.
+      </div>
+      <div id="copy-chain-form">
+        <div class="form-group">
+          <label>Target chain</label>
+          <select id="copy-chain-select" style="background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:5px 10px;font-size:0.88rem;width:100%"></select>
+        </div>
+        <div style="background:#1c2128;border:1px solid #f0883e44;border-radius:6px;padding:12px;margin-bottom:16px;font-size:0.82rem;color:#f0883e">
+          ⚠️ All memories will be copied as new append-only entries on the target chain. This action cannot be undone. The agent must not already have thoughts on the target chain — copying to a chain where the agent is already present is blocked to avoid diverged histories.
+        </div>
+        <div class="form-group">
+          <label>Type the target chain name to confirm</label>
+          <input type="text" id="copy-chain-confirm" placeholder="chain name…" autocomplete="off"
+            style="background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:6px 10px;font-size:0.88rem;width:100%;box-sizing:border-box">
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <button id="copy-chain-go" class="btn btn-primary btn-sm" disabled>Copy Memories</button>
+          <span id="copy-chain-fb" class="feedback"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script>
   // =====================================================================
   // CONSTANTS
@@ -1035,6 +1067,7 @@
           <span>Recent Thoughts</span>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
             <button class="btn btn-secondary btn-sm" id="ad-export-btn">📄 Export Memory…</button>
+            <button class="btn btn-secondary btn-sm" id="ad-copy-btn">📋 Copy to Chain…</button>
             <a class="btn btn-secondary btn-sm" href="#agent-thoughts/${encodeURIComponent(chainKey)}/${encodeURIComponent(agentId)}">All ${esc(agent.display_name || agentId)}'s thoughts on ${esc(chainKey)} →</a>
           </div>
         </div>
@@ -1127,6 +1160,11 @@
     // ── Export Memory dialog ──────────────────────────────────────────────
     document.getElementById('ad-export-btn').addEventListener('click', () => {
       openMemoryExportModal(agentId, agent.display_name || agentId, chainKey);
+    });
+
+    // ── Copy to Chain dialog ──────────────────────────────────────────────
+    document.getElementById('ad-copy-btn').addEventListener('click', () => {
+      openCopyToChainModal(agentId, agent.display_name || agentId, chainKey);
     });
 
     // Cross-chain links: find all chains where this agent appears
@@ -1279,6 +1317,108 @@
         });
 
       overlay.style.display = '';
+    };
+  })();
+
+  // =====================================================================
+  // COPY AGENT TO CHAIN
+  // =====================================================================
+  (function() {
+    const overlay     = document.getElementById('copy-chain-overlay');
+    const closeBtn    = document.getElementById('copy-chain-close');
+    const desc        = document.getElementById('copy-chain-desc');
+    const noTargets   = document.getElementById('copy-chain-no-targets');
+    const form        = document.getElementById('copy-chain-form');
+    const chainSelect = document.getElementById('copy-chain-select');
+    const confirmIn   = document.getElementById('copy-chain-confirm');
+    const goBtn       = document.getElementById('copy-chain-go');
+    const fb          = document.getElementById('copy-chain-fb');
+
+    let _agentId    = null;
+    let _srcChain   = null;
+
+    closeBtn.addEventListener('click', () => { overlay.style.display = 'none'; });
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.style.display = 'none'; });
+
+    // Enable the Copy button only when the typed name matches the selected chain.
+    confirmIn.addEventListener('input', () => {
+      goBtn.disabled = confirmIn.value.trim() !== chainSelect.value;
+    });
+    chainSelect.addEventListener('change', () => {
+      confirmIn.value = '';
+      goBtn.disabled = true;
+      fb.textContent = '';
+    });
+
+    goBtn.addEventListener('click', () => {
+      const target = chainSelect.value;
+      if (!target || !_agentId || !_srcChain) return;
+      goBtn.disabled = true;
+      fb.textContent = '';
+      api(`/dashboard/api/agents/${encodeURIComponent(_srcChain)}/${encodeURIComponent(_agentId)}/copy-to/${encodeURIComponent(target)}`, {
+        method: 'POST',
+      })
+      .then(d => {
+        showFeedback(fb, true, `✓ Copied ${d.copied} thought${d.copied === 1 ? '' : 's'} to ${target}`);
+        confirmIn.value = '';
+        goBtn.disabled = true;
+        // Remove this chain from the dropdown since the agent is now there.
+        const opt = chainSelect.querySelector(`option[value="${CSS.escape(target)}"]`);
+        if (opt) opt.remove();
+        if (chainSelect.options.length === 0) {
+          form.style.display = 'none';
+          noTargets.style.display = '';
+        }
+      })
+      .catch(err => {
+        showFeedback(fb, false, err.message);
+        goBtn.disabled = false;
+      });
+    });
+
+    window.openCopyToChainModal = function(agentId, displayName, srcChainKey) {
+      _agentId  = agentId;
+      _srcChain = srcChainKey;
+
+      desc.textContent = `Copy all of ${displayName}'s memories from "${srcChainKey}" to another chain.`;
+      confirmIn.value = '';
+      fb.textContent  = '';
+      goBtn.disabled  = true;
+      chainSelect.innerHTML = '';
+      noTargets.style.display = 'none';
+      form.style.display = '';
+
+      // Fetch all chains, then subtract the source chain and any chains where
+      // this agent already has thoughts.
+      Promise.all([
+        api('/dashboard/api/chains'),
+        api('/dashboard/api/agents'),
+      ]).then(([chainsData, allByChain]) => {
+        const existsOn = new Set(
+          Object.entries(allByChain)
+            .filter(([, agents]) => agents.some(a => (a.agent_id || a.id) === agentId))
+            .map(([ck]) => ck)
+        );
+        const eligible = (Array.isArray(chainsData) ? chainsData : (chainsData.chains || []))
+          .map(c => c.chain_key || c)
+          .filter(ck => ck !== srcChainKey && !existsOn.has(ck));
+
+        if (eligible.length === 0) {
+          form.style.display = 'none';
+          noTargets.style.display = '';
+        } else {
+          eligible.forEach(ck => {
+            const opt = document.createElement('option');
+            opt.value = ck;
+            opt.textContent = ck;
+            chainSelect.appendChild(opt);
+          });
+        }
+        overlay.style.display = '';
+      }).catch(err => {
+        desc.textContent = `Error loading chains: ${err.message}`;
+        overlay.style.display = '';
+      });
     };
   })();
 
@@ -1528,13 +1668,13 @@
               <div class="form-group" style="margin:0">
                 <label>From version</label>
                 <select id="diff-from" style="width:auto">
-                  ${versions.slice().reverse().map((v,i)=>`<option value="${esc(v.version_id)}">${versions.length - i}: ${esc(v.version_id.slice(0,8))}… (${esc(fmtDate(v.uploaded_at))})</option>`).join('')}
+                  ${versions.map((v,i)=>`<option value="${esc(v.version_id)}" ${i===0?'selected':''}>${i+1}: ${esc(v.version_id.slice(0,8))}… (${esc(fmtDate(v.uploaded_at))})</option>`).join('')}
                 </select>
               </div>
               <div class="form-group" style="margin:0">
                 <label>To version</label>
                 <select id="diff-to" style="width:auto">
-                  ${versions.map((v,i)=>`<option value="${esc(v.version_id)}" ${v.version_id===SD.versionId?'selected':''}>${i+1}: ${esc(v.version_id.slice(0,8))}… (${esc(fmtDate(v.uploaded_at))})</option>`).join('')}
+                  ${versions.map((v,i)=>`<option value="${esc(v.version_id)}" ${i===versions.length-1?'selected':''}>${i+1}: ${esc(v.version_id.slice(0,8))}… (${esc(fmtDate(v.uploaded_at))})</option>`).join('')}
                 </select>
               </div>
               <button class="btn btn-primary btn-sm" id="diff-go">Show Diff</button>

@@ -127,6 +127,11 @@ pub(crate) fn dashboard_router(state: DashboardState) -> Router {
             "/agents/{chain_key}/{agent_id}/memory-markdown",
             get(api_agent_memory_markdown),
         )
+        // Copy agent memories to another chain
+        .route(
+            "/agents/{chain_key}/{agent_id}/copy-to/{target_chain_key}",
+            post(api_copy_agent_to_chain),
+        )
         // Skill listing and reading
         .route("/skills", get(api_skills))
         .route("/skills/{skill_id}", get(api_get_skill))
@@ -1020,4 +1025,133 @@ async fn api_agent_memory_markdown(
     let filename = format!("{}_{}_AGENT.md", safe(&agent_id), safe(&chain_key));
 
     Ok(Json(json!({ "markdown": markdown, "filename": filename })))
+}
+
+/// `POST /dashboard/api/agents/{chain_key}/{agent_id}/copy-to/{target_chain_key}`
+///
+/// Copies every thought attributed to `agent_id` on the source chain
+/// (`chain_key`) to `target_chain_key` as new append-only entries, preserving
+/// all semantic fields (type, role, content, tags, concepts, confidence,
+/// importance).
+///
+/// # Constraints
+///
+/// - If `agent_id` already has at least one thought on the target chain the
+///   request is rejected with `409 Conflict`. This avoids the complexity of
+///   syncing diverged histories whose hashes will never match.
+/// - Cross-chain positional `refs` and typed `relations` are intentionally
+///   dropped: they reference thought indices / UUIDs that belong to the
+///   source chain and are meaningless on the target chain.
+/// - The agent's display name and owner are propagated via the first appended
+///   thought so the agent registry on the target chain is populated correctly.
+///
+/// # Response
+///
+/// ```json
+/// { "copied": 42 }
+/// ```
+async fn api_copy_agent_to_chain(
+    State(state): State<DashboardState>,
+    Path((chain_key, agent_id, target_chain_key)): Path<(String, String, String)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if chain_key == target_chain_key {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "source and target chain must differ" })),
+        ));
+    }
+
+    // Open source chain (read-only snapshot).
+    let src_arc = get_or_open_chain(&state, &chain_key).await?;
+    let src_chain = src_arc.read().await;
+
+    // Collect thoughts belonging to this agent (oldest first).
+    let agent_thoughts: Vec<ThoughtInput> = {
+        // Retrieve agent metadata for name/owner propagation.
+        let (agent_name, agent_owner): (String, Option<String>) = src_chain
+            .get_agent(&agent_id)
+            .map(|a| (a.display_name.clone(), a.owner.clone()))
+            .unwrap_or_else(|| (String::new(), None));
+
+        src_chain
+            .thoughts()
+            .iter()
+            .filter(|t| t.agent_id == agent_id)
+            .enumerate()
+            .map(|(i, t)| {
+                let mut input = ThoughtInput::new(t.thought_type, t.content.clone());
+                input.role = t.role;
+                input.importance = t.importance;
+                input.confidence = t.confidence;
+                input.tags = t.tags.clone();
+                input.concepts = t.concepts.clone();
+                // Propagate agent metadata on the first thought so the target
+                // chain's agent registry entry is populated with the correct
+                // display name and owner.
+                if i == 0 {
+                    if !agent_name.is_empty() {
+                        input.agent_name = Some(agent_name.clone());
+                    }
+                    if let Some(ref owner) = agent_owner {
+                        if !owner.is_empty() {
+                            input.agent_owner = Some(owner.clone());
+                        }
+                    }
+                }
+                // refs and relations are positional/UUID references into the
+                // source chain; they cannot be meaningfully carried over.
+                input
+            })
+            .collect()
+    };
+    drop(src_chain);
+
+    if agent_thoughts.is_empty() {
+        return Ok(Json(json!({ "copied": 0 })));
+    }
+
+    // Open (or create) the target chain.
+    let dst_arc = {
+        // create_new=false: open if it exists, create if it doesn't
+        let chain = MentisDb::open_with_key_and_storage_kind(
+            &state.mentisdb_dir,
+            &target_chain_key,
+            state.default_storage_adapter,
+        )
+        .map_err(|e| internal_error(format!("open target chain '{target_chain_key}': {e}")))?;
+        let arc = Arc::new(RwLock::new(chain));
+        state
+            .chains
+            .insert(target_chain_key.clone(), arc.clone());
+        arc
+    };
+
+    let mut dst_chain = dst_arc.write().await;
+
+    // Guard: reject if the agent already has thoughts on the target chain.
+    let already_exists = dst_chain
+        .thoughts()
+        .iter()
+        .any(|t| t.agent_id == agent_id);
+    if already_exists {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!(
+                    "agent '{agent_id}' already has thoughts on chain '{target_chain_key}'; \
+                     copying would create a diverged history"
+                )
+            })),
+        ));
+    }
+
+    let mut copied = 0usize;
+    for input in agent_thoughts {
+        dst_chain
+            .append_thought(&agent_id, input)
+            .map_err(|e| internal_error(format!("append thought: {e}")))?;
+        copied += 1;
+    }
+
+    Ok(Json(json!({ "copied": copied })))
 }

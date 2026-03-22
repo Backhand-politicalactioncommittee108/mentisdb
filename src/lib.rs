@@ -317,6 +317,10 @@ impl Clone for BinaryStorageAdapter {
 /// Only relevant when `BinaryStorageAdapter::auto_flush = false`.
 pub const FLUSH_THRESHOLD: usize = 16;
 
+/// Number of append-driven chain-registration count updates to batch before
+/// rewriting the global registry file.
+const CHAIN_REGISTRATION_FLUSH_THRESHOLD: usize = FLUSH_THRESHOLD;
+
 /// Mutable write state held inside [`BinaryStorageAdapter`].
 struct WriterState {
     /// Lazily opened, persistent file handle.  `None` until the first write.
@@ -1955,6 +1959,8 @@ pub struct MentisDb {
     storage: Box<dyn StorageAdapter>,
     auto_flush: bool,
     persistence: Option<ChainPersistenceMetadata>,
+    pending_chain_registration_sync: bool,
+    pending_chain_registration_updates: usize,
 }
 
 impl MentisDb {
@@ -2046,6 +2052,8 @@ impl MentisDb {
             storage,
             auto_flush: true,
             persistence,
+            pending_chain_registration_sync: false,
+            pending_chain_registration_updates: 0,
         };
 
         if !chain.verify_integrity() {
@@ -2203,6 +2211,7 @@ impl MentisDb {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
+        let previous_agent_count = self.agent_registry.agents.len();
         input.importance = input.importance.clamp(0.0, 1.0);
         let thought = Thought {
             schema_version: MENTISDB_CURRENT_VERSION,
@@ -2244,6 +2253,7 @@ impl MentisDb {
             index,
             timestamp,
         );
+        let agent_count_changed = self.agent_registry.agents.len() != previous_agent_count;
         // Insert into all in-memory indexes before pushing so that
         // self.thoughts.len() still equals `index` (the correct 0-based position).
         self.id_to_index.insert(thought.id, self.thoughts.len());
@@ -2251,9 +2261,9 @@ impl MentisDb {
             .insert(thought.hash.clone(), self.thoughts.len());
         self.query_indexes.observe(self.thoughts.len(), &thought);
         self.thoughts.push(thought.clone());
-        // Persist after push so thought_count in the registry reflects the
-        // just-appended thought (self.thoughts.len() is now index + 1).
-        self.persist_registries()?;
+        self.persist_agent_registry()?;
+        self.mark_chain_registration_dirty();
+        self.maybe_flush_chain_registration(self.thoughts.len() == 1 || agent_count_changed)?;
         Ok(self.thoughts.last().unwrap())
     }
 
@@ -3189,7 +3199,7 @@ impl MentisDb {
         self.auto_flush = auto_flush;
     }
 
-    fn persist_registries(&self) -> io::Result<()> {
+    fn persist_agent_registry(&self) -> io::Result<()> {
         if let Some(metadata) = &self.persistence {
             save_agent_registry(
                 &metadata.chain_dir,
@@ -3198,7 +3208,33 @@ impl MentisDb {
                 &self.agent_registry,
             )?;
         }
-        self.persist_chain_registration()
+        Ok(())
+    }
+
+    fn mark_chain_registration_dirty(&mut self) {
+        if self.persistence.is_some() {
+            self.pending_chain_registration_sync = true;
+            self.pending_chain_registration_updates =
+                self.pending_chain_registration_updates.saturating_add(1);
+        }
+    }
+
+    fn maybe_flush_chain_registration(&mut self, force: bool) -> io::Result<()> {
+        if !self.pending_chain_registration_sync {
+            return Ok(());
+        }
+        if force || self.pending_chain_registration_updates >= CHAIN_REGISTRATION_FLUSH_THRESHOLD {
+            self.persist_chain_registration()?;
+            self.pending_chain_registration_sync = false;
+            self.pending_chain_registration_updates = 0;
+        }
+        Ok(())
+    }
+
+    fn persist_registries(&mut self) -> io::Result<()> {
+        self.persist_agent_registry()?;
+        self.mark_chain_registration_dirty();
+        self.maybe_flush_chain_registration(true)
     }
 
     fn persist_chain_registration(&self) -> io::Result<()> {
@@ -3227,6 +3263,12 @@ impl MentisDb {
             },
         );
         save_mentisdb_registry(&metadata.chain_dir, &registry)
+    }
+}
+
+impl Drop for MentisDb {
+    fn drop(&mut self) {
+        let _ = self.maybe_flush_chain_registration(true);
     }
 }
 

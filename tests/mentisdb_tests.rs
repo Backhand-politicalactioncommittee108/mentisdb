@@ -11,7 +11,7 @@ use mentisdb::{
     PublicKeyAlgorithm, StorageAdapter, StorageAdapterKind, Thought, ThoughtInput, ThoughtQuery,
     ThoughtRelation, ThoughtRelationKind, ThoughtRole, ThoughtTimeWindow, ThoughtTraversalAnchor,
     ThoughtTraversalDirection, ThoughtTraversalRequest, ThoughtType, TimeWindowUnit,
-    MENTISDB_CURRENT_VERSION,
+    FLUSH_THRESHOLD, MENTISDB_CURRENT_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -314,6 +314,87 @@ fn query_filters_by_timestamp_window() {
             .with_until(first_timestamp),
     );
     assert!(empty.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn registered_chain_counts_batch_append_updates_until_threshold_or_drop() {
+    let dir = unique_chain_dir();
+    let chain_key = "batched-chain-registration";
+
+    {
+        let mut chain = MentisDb::open_with_key(&dir, chain_key).unwrap();
+        chain.append("astro", ThoughtType::Insight, "t0").unwrap();
+
+        let first = load_registered_chains(&dir).unwrap();
+        let first_entry = first.chains.get(chain_key).unwrap();
+        assert_eq!(first_entry.thought_count, 1);
+        assert_eq!(first_entry.agent_count, 1);
+
+        for index in 1..FLUSH_THRESHOLD {
+            chain
+                .append("astro", ThoughtType::Insight, &format!("t{index}"))
+                .unwrap();
+        }
+
+        let before_threshold = load_registered_chains(&dir).unwrap();
+        assert_eq!(
+            before_threshold
+                .chains
+                .get(chain_key)
+                .unwrap()
+                .thought_count,
+            1
+        );
+
+        chain
+            .append(
+                "astro",
+                ThoughtType::Insight,
+                &format!("t{}", FLUSH_THRESHOLD),
+            )
+            .unwrap();
+
+        let after_threshold = load_registered_chains(&dir).unwrap();
+        assert_eq!(
+            after_threshold.chains.get(chain_key).unwrap().thought_count,
+            (FLUSH_THRESHOLD + 1) as u64
+        );
+
+        chain.append("astro", ThoughtType::Insight, "tail").unwrap();
+        let before_drop = load_registered_chains(&dir).unwrap();
+        assert_eq!(
+            before_drop.chains.get(chain_key).unwrap().thought_count,
+            (FLUSH_THRESHOLD + 1) as u64
+        );
+    }
+
+    let after_drop = load_registered_chains(&dir).unwrap();
+    let entry = after_drop.chains.get(chain_key).unwrap();
+    assert_eq!(entry.thought_count, (FLUSH_THRESHOLD + 2) as u64);
+    assert_eq!(entry.agent_count, 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn registered_chain_counts_flush_immediately_when_agent_count_changes() {
+    let dir = unique_chain_dir();
+    let chain_key = "agent-count-registration";
+    let mut chain = MentisDb::open_with_key(&dir, chain_key).unwrap();
+
+    chain
+        .append("astro", ThoughtType::Insight, "astro thought")
+        .unwrap();
+    chain
+        .append("apollo", ThoughtType::Insight, "apollo thought")
+        .unwrap();
+
+    let registry = load_registered_chains(&dir).unwrap();
+    let entry = registry.chains.get(chain_key).unwrap();
+    assert_eq!(entry.thought_count, 2);
+    assert_eq!(entry.agent_count, 2);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

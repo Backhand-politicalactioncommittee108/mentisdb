@@ -636,7 +636,7 @@ async fn rest_router_bootstraps_and_reports_head() {
         .iter()
         .find(|entry| entry["chain_key"] == "server-test")
         .unwrap();
-    assert_eq!(summary["version"], 1);
+    assert_eq!(summary["version"], 2);
     assert_eq!(summary["storage_adapter"], "binary");
     assert_eq!(summary["thought_count"], 1);
     assert_eq!(summary["agent_count"], 1);
@@ -1884,7 +1884,7 @@ async fn rest_router_lists_chains_and_agents() {
         .iter()
         .find(|entry| entry["chain_key"] == "shared-brain")
         .unwrap();
-    assert_eq!(summary["version"], 1);
+    assert_eq!(summary["version"], 2);
     assert_eq!(summary["storage_adapter"], "jsonl");
     assert_eq!(summary["thought_count"], 2);
     assert_eq!(summary["agent_count"], 2);

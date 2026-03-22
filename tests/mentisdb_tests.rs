@@ -136,6 +136,7 @@ fn resolve_context_follows_refs_and_relations() {
             .with_relations(vec![ThoughtRelation {
                 kind: ThoughtRelationKind::DerivedFrom,
                 target_id: base_id,
+                chain_key: None,
             }]),
         )
         .unwrap();
@@ -1585,4 +1586,265 @@ fn legacy_registry_filename_is_upgraded_to_mentisdb_registry_name() {
     assert!(dir.join("mentisdb-registry.json").exists());
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+// ── v0.5.2 tests: Reframe, Supersedes, cross-chain ThoughtRelation ────────────
+
+/// Verifies that a `Reframe` thought can be appended and read back with the
+/// correct `ThoughtType`.
+#[test]
+fn test_reframe_thought_type_roundtrip() {
+    let dir = unique_chain_dir();
+    let mut chain = MentisDb::open_with_key(&dir, "reframe-roundtrip").unwrap();
+
+    let thought = chain
+        .append("agent-reframe", ThoughtType::Reframe, "The failure was not a disaster but a learning opportunity.")
+        .unwrap();
+
+    assert_eq!(thought.thought_type, ThoughtType::Reframe);
+
+    // Reload from disk and verify persistence
+    let reloaded = MentisDb::open_with_key(&dir, "reframe-roundtrip").unwrap();
+    assert_eq!(reloaded.thoughts().len(), 1);
+    assert_eq!(reloaded.thoughts()[0].thought_type, ThoughtType::Reframe);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Verifies that a `Reframe` thought can reference an earlier thought via a
+/// `Supersedes` relation, and that the relation is stored and retrieved correctly.
+#[test]
+fn test_supersedes_relation() {
+    let dir = unique_chain_dir();
+    let mut chain = MentisDb::open_with_key(&dir, "supersedes-relation").unwrap();
+
+    let first = chain
+        .append("agent1", ThoughtType::FactLearned, "We must never retry on timeout.")
+        .unwrap();
+    let first_id = first.id;
+
+    let input = ThoughtInput::new(
+        ThoughtType::Reframe,
+        "Retrying on timeout is fine with exponential backoff; the prior rule was too broad.",
+    )
+    .with_relations(vec![ThoughtRelation {
+        kind: ThoughtRelationKind::Supersedes,
+        target_id: first_id,
+        chain_key: None,
+    }]);
+
+    let second = chain.append_thought("agent1", input).unwrap();
+
+    assert_eq!(second.relations.len(), 1);
+    assert_eq!(second.relations[0].kind, ThoughtRelationKind::Supersedes);
+    assert_eq!(second.relations[0].target_id, first_id);
+    assert!(second.relations[0].chain_key.is_none());
+
+    // Reload from disk and verify
+    let reloaded = MentisDb::open_with_key(&dir, "supersedes-relation").unwrap();
+    let reloaded_second = &reloaded.thoughts()[1];
+    assert_eq!(reloaded_second.relations[0].kind, ThoughtRelationKind::Supersedes);
+    assert_eq!(reloaded_second.relations[0].target_id, first_id);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Verifies that a cross-chain `ThoughtRelation` (with `chain_key: Some(...)`)
+/// survives a JSON serialize → deserialize roundtrip with `chain_key` preserved.
+#[test]
+fn test_cross_chain_relation_serde() {
+    let target = Uuid::new_v4();
+    let relation = ThoughtRelation {
+        kind: ThoughtRelationKind::Supersedes,
+        target_id: target,
+        chain_key: Some("other-chain".to_string()),
+    };
+
+    let json = serde_json::to_string(&relation).unwrap();
+    let deserialized: ThoughtRelation = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(deserialized.kind, ThoughtRelationKind::Supersedes);
+    assert_eq!(deserialized.target_id, target);
+    assert_eq!(deserialized.chain_key.as_deref(), Some("other-chain"));
+}
+
+/// Verifies that an intra-chain `ThoughtRelation` (with `chain_key: None`)
+/// serializes to JSON WITHOUT a `chain_key` field (backward-compatible),
+/// and deserializes back with `chain_key == None`.
+#[test]
+fn test_intra_chain_relation_backward_compat() {
+    let target = Uuid::new_v4();
+    let relation = ThoughtRelation {
+        kind: ThoughtRelationKind::References,
+        target_id: target,
+        chain_key: None,
+    };
+
+    let json = serde_json::to_string(&relation).unwrap();
+
+    // The field must be absent when None (skip_serializing_if = "Option::is_none")
+    assert!(
+        !json.contains("chain_key"),
+        "Expected no 'chain_key' field in JSON for intra-chain relation, got: {json}"
+    );
+
+    let deserialized: ThoughtRelation = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.chain_key, None);
+    assert_eq!(deserialized.target_id, target);
+}
+
+// ---------------------------------------------------------------------------
+// import_from_memory_markdown tests
+// ---------------------------------------------------------------------------
+
+/// Verifies the basic round-trip: export a chain with several thought types,
+/// import the markdown into a new chain, and confirm that the imported thought
+/// count and types match the originals.
+#[test]
+fn test_import_memory_markdown_basic() {
+    let dir = unique_chain_dir();
+
+    // Build a source chain with a mix of types.
+    let mut src = MentisDb::open_with_key(&dir, "src-chain").unwrap();
+    src.append_thought(
+        "alice",
+        ThoughtInput::new(ThoughtType::Decision, "Use PostgreSQL")
+            .with_importance(0.90)
+            .with_confidence(0.95),
+    )
+    .unwrap();
+    src.append_thought(
+        "alice",
+        ThoughtInput::new(ThoughtType::Insight, "Connection pooling matters")
+            .with_importance(0.75),
+    )
+    .unwrap();
+    src.append_thought(
+        "bob",
+        ThoughtInput::new(ThoughtType::Correction, "Timeout is 30s not 10s")
+            .with_role(ThoughtRole::Retrospective)
+            .with_importance(0.80),
+    )
+    .unwrap();
+
+    let markdown = src.to_memory_markdown(None);
+
+    // Import into a fresh destination chain.
+    let dst_dir = unique_chain_dir();
+    let mut dst = MentisDb::open_with_key(&dst_dir, "dst-chain").unwrap();
+    let indices = dst
+        .import_from_memory_markdown(&markdown, "fallback-agent")
+        .unwrap();
+
+    assert_eq!(
+        indices.len(),
+        3,
+        "expected 3 imported thoughts, got {}: markdown=\n{markdown}",
+        indices.len()
+    );
+
+    // Verify all imported indices are sequential starting at 0.
+    assert_eq!(indices, vec![0, 1, 2]);
+
+    // to_memory_markdown groups thoughts by section (Knowledge before
+    // Constraints And Decisions before Corrections), so the imported order
+    // is Insight → Decision → Correction, not the original append order.
+    let thoughts = dst.thoughts();
+    let types: Vec<ThoughtType> = thoughts.iter().map(|t| t.thought_type).collect();
+    assert!(
+        types.contains(&ThoughtType::Decision),
+        "imported chain should contain a Decision thought"
+    );
+    assert!(
+        types.contains(&ThoughtType::Insight),
+        "imported chain should contain an Insight thought"
+    );
+    assert!(
+        types.contains(&ThoughtType::Correction),
+        "imported chain should contain a Correction thought"
+    );
+
+    // Verify agent IDs were captured from metadata.
+    // Decision and Insight → alice; Correction → bob.
+    for t in thoughts {
+        match t.thought_type {
+            ThoughtType::Decision | ThoughtType::Insight => {
+                assert_eq!(t.agent_id, "alice", "expected alice for {:?}", t.thought_type);
+            }
+            ThoughtType::Correction => {
+                assert_eq!(t.agent_id, "bob", "expected bob for Correction");
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Verifies that when no `agent` token is present in the metadata the
+/// `default_agent_id` parameter is used for the imported thought.
+#[test]
+fn test_import_memory_markdown_default_agent() {
+    let dir = unique_chain_dir();
+    let mut chain = MentisDb::open_with_key(&dir, "default-agent-chain").unwrap();
+
+    // Markdown with no agent token — stripped metadata for the first line,
+    // and a second line that has an explicit agent to confirm both code-paths.
+    let markdown = "## Decisions\n\
+        - [#0] Decision: No-agent line (importance 0.70)\n\
+        - [#1] Insight: Has agent line (agent explicit-agent; importance 0.60)\n";
+
+    let indices = chain
+        .import_from_memory_markdown(markdown, "my-default")
+        .unwrap();
+
+    assert_eq!(indices.len(), 2, "expected 2 imported thoughts");
+
+    let thoughts = chain.thoughts();
+    assert_eq!(
+        thoughts[0].agent_id, "my-default",
+        "no-agent line should fall back to default_agent_id"
+    );
+    assert_eq!(
+        thoughts[1].agent_id, "explicit-agent",
+        "explicit agent in metadata should override default"
+    );
+}
+
+/// Verifies that malformed or non-matching lines are silently skipped while
+/// valid lines are still imported correctly.
+#[test]
+fn test_import_memory_markdown_partial() {
+    let dir = unique_chain_dir();
+    let mut chain = MentisDb::open_with_key(&dir, "partial-chain").unwrap();
+
+    // Mix of: valid lines, section header, blank line, malformed bullet,
+    // a line with an unknown thought type.
+    let markdown = "\
+        # MEMORY\n\
+        \n\
+        ## Decisions\n\
+        \n\
+        - [#0] Decision: Valid decision (agent alice; importance 0.85)\n\
+        - this line has no index bracket\n\
+        - [#2] UnknownType: Unknown type should be skipped (agent bob; importance 0.50)\n\
+        - [#3] Insight: Second valid insight (agent carol; importance 0.70)\n\
+        Just a plain prose paragraph.\n\
+    ";
+
+    let indices = chain
+        .import_from_memory_markdown(markdown, "fallback")
+        .unwrap();
+
+    assert_eq!(
+        indices.len(),
+        2,
+        "expected 2 valid thoughts imported, got {}",
+        indices.len()
+    );
+
+    let thoughts = chain.thoughts();
+    assert_eq!(thoughts[0].thought_type, ThoughtType::Decision);
+    assert_eq!(thoughts[0].agent_id, "alice");
+    assert_eq!(thoughts[1].thought_type, ThoughtType::Insight);
+    assert_eq!(thoughts[1].agent_id, "carol");
 }

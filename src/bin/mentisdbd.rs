@@ -232,6 +232,7 @@ fn thought_sound_sequence(tt: ThoughtType) -> &'static [(f32, u64)] {
         ThoughtType::StateSnapshot => &[(329.63, 70), (261.63, 100)], // camera settle
         ThoughtType::Handoff => &[(392.00, 55), (329.63, 55), (261.63, 70)], // descending pass
         ThoughtType::Summary => &[(523.25, 80), (392.00, 100)],       // gentle close
+        ThoughtType::Reframe => &[(659.25, 60), (587.33, 60), (493.88, 60)], // E5→D5→B4 gentle recontextualisation
 
         // ── User & relationship ───────────────────────────────────────────────
         ThoughtType::PreferenceUpdate => &[(587.33, 80), (698.46, 100)], // soft note

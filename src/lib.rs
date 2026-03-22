@@ -14,7 +14,7 @@ pub mod server;
 mod skills;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -71,8 +71,11 @@ pub trait StorageAdapter: Send + Sync {
 pub const MENTISDB_SCHEMA_V0: u32 = 0;
 /// First registry-backed MentisDb storage schema version.
 pub const MENTISDB_SCHEMA_V1: u32 = 1;
+/// Schema version 2: adds [`ThoughtType::Reframe`], [`ThoughtRelationKind::Supersedes`],
+/// and optional cross-chain [`ThoughtRelation::chain_key`].
+pub const MENTISDB_SCHEMA_V2: u32 = 2;
 /// Alias for the latest supported MentisDb storage schema version.
-pub const MENTISDB_CURRENT_VERSION: u32 = MENTISDB_SCHEMA_V1;
+pub const MENTISDB_CURRENT_VERSION: u32 = MENTISDB_SCHEMA_V2;
 const MENTISDB_REGISTRY_FILENAME: &str = "mentisdb-registry.json";
 const LEGACY_THOUGHTCHAIN_REGISTRY_FILENAME: &str = "thoughtchain-registry.json";
 
@@ -970,6 +973,11 @@ pub enum ThoughtType {
     Handoff,
     /// A summary view of prior thoughts was recorded.
     Summary,
+    /// The agent recontextualised a prior thought, negative pattern, or anchoring
+    /// error without denying or deleting it.  Use `Reframe` when the original
+    /// thought was accurate but its framing was unhelpful, and a durable shift in
+    /// interpretation should be recorded alongside the original.
+    Reframe,
     /// An unexpected outcome or mismatch was observed.
     Surprise,
 }
@@ -1038,6 +1046,14 @@ pub enum ThoughtRelationKind {
     ContinuesFrom,
     /// A generic semantic relation exists between source and target.
     RelatedTo,
+    /// The source thought supersedes the target thought.
+    ///
+    /// Use when the source thought replaces a prior belief, plan, or fact
+    /// without the prior being a clear *error* (use [`Corrects`] or
+    /// [`Invalidates`] for errors).  The target thought is retained for
+    /// audit; retrieval tooling should treat superseded thoughts as
+    /// lower-priority.
+    Supersedes,
 }
 
 /// Typed edge in the thought graph.
@@ -1057,19 +1073,66 @@ pub enum ThoughtRelationKind {
 /// use mentisdb::{ThoughtRelation, ThoughtRelationKind};
 /// use uuid::Uuid;
 ///
-/// let relation = ThoughtRelation {
+/// // Intra-chain relation (chain_key is None)
+/// let intra = ThoughtRelation {
 ///     kind: ThoughtRelationKind::Supports,
 ///     target_id: Uuid::nil(),
+///     chain_key: None,
 /// };
+/// assert_eq!(intra.kind, ThoughtRelationKind::Supports);
+/// assert!(intra.chain_key.is_none());
 ///
-/// assert_eq!(relation.kind, ThoughtRelationKind::Supports);
+/// // Cross-chain relation
+/// let cross = ThoughtRelation {
+///     kind: ThoughtRelationKind::Supersedes,
+///     target_id: Uuid::nil(),
+///     chain_key: Some("other-chain".to_string()),
+/// };
+/// assert_eq!(cross.chain_key.as_deref(), Some("other-chain"));
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ThoughtRelation {
     /// Semantic meaning of the edge.
     pub kind: ThoughtRelationKind,
     /// Stable id of the target thought.
     pub target_id: Uuid,
+    /// Optional chain key for cross-chain relations.
+    ///
+    /// When `None` (the default) this relation is intra-chain.
+    /// When `Some(key)` this relation points to a thought on a different chain.
+    ///
+    /// In JSON output this field is omitted when `None` (backward compatible).
+    /// In binary storage it is always written so that the sequential binary
+    /// layout stays consistent across schema versions.
+    #[serde(default)]
+    pub chain_key: Option<String>,
+}
+
+impl Serialize for ThoughtRelation {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        if serializer.is_human_readable() {
+            // Human-readable formats (JSON, TOML, etc.): omit `chain_key` when
+            // `None` to keep output compact and backward compatible.
+            let field_count = if self.chain_key.is_some() { 3 } else { 2 };
+            let mut s = serializer.serialize_struct("ThoughtRelation", field_count)?;
+            s.serialize_field("kind", &self.kind)?;
+            s.serialize_field("target_id", &self.target_id)?;
+            if let Some(ref ck) = self.chain_key {
+                s.serialize_field("chain_key", ck)?;
+            }
+            s.end()
+        } else {
+            // Binary formats (bincode, etc.): always write every field so that
+            // sequential decoding stays aligned regardless of the `chain_key`
+            // value.  A `None` is encoded as a single zero byte.
+            let mut s = serializer.serialize_struct("ThoughtRelation", 3)?;
+            s.serialize_field("kind", &self.kind)?;
+            s.serialize_field("target_id", &self.target_id)?;
+            s.serialize_field("chain_key", &self.chain_key)?;
+            s.end()
+        }
+    }
 }
 
 /// Builder-like input struct used to append rich thoughts.
@@ -1285,6 +1348,25 @@ impl ThoughtInput {
     /// Add typed graph relations to prior thoughts.
     pub fn with_relations(mut self, relations: Vec<ThoughtRelation>) -> Self {
         self.relations = relations;
+        self
+    }
+
+    /// Add a typed relation pointing to a thought on another chain.
+    ///
+    /// `chain_key` is the target chain's key.  `target_id` is the stable UUID
+    /// of the thought on that chain.  Use the normal `with_relations` builder
+    /// for intra-chain relations.
+    pub fn with_cross_chain_relation(
+        mut self,
+        kind: ThoughtRelationKind,
+        chain_key: impl Into<String>,
+        target_id: Uuid,
+    ) -> Self {
+        self.relations.push(ThoughtRelation {
+            kind,
+            target_id,
+            chain_key: Some(chain_key.into()),
+        });
         self
     }
 }
@@ -1925,6 +2007,29 @@ struct ChainPersistenceMetadata {
     storage_kind: StorageAdapterKind,
 }
 
+/// Legacy `ThoughtRelation` used when reading schema-v0 binary chains.
+///
+/// Schema-v0 binary chains serialise relations as two-field records:
+/// `(kind, target_id)`.  The modern [`ThoughtRelation`] adds `chain_key` as a
+/// third field; reading old binary data with the three-field struct would
+/// misalign the sequential decoder.  Migration code converts these into
+/// canonical [`ThoughtRelation`] values with `chain_key: None`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyThoughtRelation {
+    kind: ThoughtRelationKind,
+    target_id: Uuid,
+}
+
+impl From<LegacyThoughtRelation> for ThoughtRelation {
+    fn from(l: LegacyThoughtRelation) -> Self {
+        ThoughtRelation {
+            kind: l.kind,
+            target_id: l.target_id,
+            chain_key: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LegacyThoughtV0 {
     id: Uuid,
@@ -1944,7 +2049,7 @@ struct LegacyThoughtV0 {
     tags: Vec<String>,
     concepts: Vec<String>,
     refs: Vec<u64>,
-    relations: Vec<ThoughtRelation>,
+    relations: Vec<LegacyThoughtRelation>,
     prev_hash: String,
     hash: String,
 }
@@ -2186,6 +2291,7 @@ impl MentisDb {
                 relations.push(ThoughtRelation {
                     kind: ThoughtRelationKind::References,
                     target_id: target.id,
+                    chain_key: None,
                 });
             }
         }
@@ -3147,6 +3253,7 @@ impl MentisDb {
                 ThoughtType::Correction,
                 ThoughtType::LessonLearned,
                 ThoughtType::AssumptionInvalidated,
+                ThoughtType::Reframe,
             ],
         );
         append_memory_section(
@@ -3177,6 +3284,74 @@ impl MentisDb {
         );
 
         markdown
+    }
+
+    /// Import thoughts from a MEMORY.md-formatted markdown string.
+    ///
+    /// Each line matching the format produced by [`to_memory_markdown`] is
+    /// parsed and appended as a new thought:
+    ///
+    /// ```text
+    /// - [#N] TypeName: content (agent agent_id; role RoleName; importance 0.85; confidence 0.90; tags tag1, tag2)
+    /// ```
+    ///
+    /// The source index `[#N]` is **discarded** — thoughts receive new
+    /// append-order indices assigned by this chain. Lines that do not match
+    /// the pattern (section headers, blank lines, malformed entries) are
+    /// silently skipped.
+    ///
+    /// # Parameters
+    ///
+    /// - `markdown` — MEMORY.md formatted content to import.
+    /// - `default_agent_id` — Agent ID to use when a parsed line contains no
+    ///   `agent` token in its metadata.
+    ///
+    /// # Returns
+    ///
+    /// The append-order indices of all successfully imported thoughts, in
+    /// import order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if any individual [`append_thought`] call fails.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use std::path::PathBuf;
+    /// use mentisdb::MentisDb;
+    ///
+    /// let mut chain = MentisDb::open_with_key(&PathBuf::from("/tmp/import_demo"), "demo").unwrap();
+    /// let markdown = "## Decisions\n\
+    ///     - [#0] Decision: Use PostgreSQL (agent alice; importance 0.90)\n";
+    /// let indices = chain.import_from_memory_markdown(markdown, "default-agent").unwrap();
+    /// assert_eq!(indices.len(), 1);
+    /// ```
+    pub fn import_from_memory_markdown(
+        &mut self,
+        markdown: &str,
+        default_agent_id: &str,
+    ) -> io::Result<Vec<u64>> {
+        let mut indices = Vec::new();
+        for line in markdown.lines() {
+            let Some(parsed) = parse_memory_markdown_line(line) else {
+                continue;
+            };
+            let agent_id = parsed
+                .agent_id
+                .as_deref()
+                .unwrap_or(default_agent_id);
+            let mut input = ThoughtInput::new(parsed.thought_type, parsed.content)
+                .with_role(parsed.role)
+                .with_importance(parsed.importance)
+                .with_tags(parsed.tags);
+            if let Some(conf) = parsed.confidence {
+                input = input.with_confidence(conf);
+            }
+            let thought = self.append_thought(agent_id, input)?;
+            indices.push(thought.index);
+        }
+        Ok(indices)
     }
 
     /// Return all thoughts in chronological order.
@@ -3456,12 +3631,18 @@ fn load_mentisdb_registry(chain_dir: &Path) -> io::Result<MentisDbRegistry> {
     }
 
     let file = fs::File::open(path)?;
-    serde_json::from_reader(file).map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Failed to deserialize MentisDB registry: {error}"),
-        )
-    })
+    let mut registry: MentisDbRegistry =
+        serde_json::from_reader(file).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to deserialize MentisDB registry: {error}"),
+            )
+        })?;
+    // Always normalise the in-memory version to the current schema version so
+    // callers that compare against `MENTISDB_CURRENT_VERSION` see a consistent
+    // value regardless of when the file was last written.
+    registry.version = MENTISDB_CURRENT_VERSION;
+    Ok(registry)
 }
 
 fn save_mentisdb_registry(chain_dir: &Path, registry: &MentisDbRegistry) -> io::Result<()> {
@@ -4130,7 +4311,7 @@ fn migrate_legacy_thoughts(legacy_thoughts: Vec<LegacyThoughtV0>) -> (Vec<Though
             tags: legacy.tags,
             concepts: legacy.concepts,
             refs: legacy.refs,
-            relations: legacy.relations,
+            relations: legacy.relations.into_iter().map(ThoughtRelation::from).collect(),
             prev_hash: prev_hash.clone(),
             hash: String::new(),
         };
@@ -4148,6 +4329,198 @@ fn migrate_legacy_thoughts(legacy_thoughts: Vec<LegacyThoughtV0>) -> (Vec<Though
     }
 
     (migrated, agent_registry)
+}
+
+// ---------------------------------------------------------------------------
+// MEMORY.md import helpers
+// ---------------------------------------------------------------------------
+
+/// Parsed representation of a single MEMORY.md thought line.
+struct MarkdownThoughtLine {
+    thought_type: ThoughtType,
+    content: String,
+    agent_id: Option<String>,
+    role: ThoughtRole,
+    importance: f32,
+    confidence: Option<f32>,
+    tags: Vec<String>,
+}
+
+/// Parse a [`ThoughtType`] from its `{:?}` (Debug) PascalCase representation,
+/// accepting any mix of case and ignoring non-alphanumeric characters.
+fn parse_thought_type_from_debug(input: &str) -> Option<ThoughtType> {
+    let normalized: String = input
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_lowercase();
+    match normalized.as_str() {
+        "preferenceupdate" => Some(ThoughtType::PreferenceUpdate),
+        "usertrait" => Some(ThoughtType::UserTrait),
+        "relationshipupdate" => Some(ThoughtType::RelationshipUpdate),
+        "finding" => Some(ThoughtType::Finding),
+        "insight" => Some(ThoughtType::Insight),
+        "factlearned" => Some(ThoughtType::FactLearned),
+        "patterndetected" => Some(ThoughtType::PatternDetected),
+        "hypothesis" => Some(ThoughtType::Hypothesis),
+        "mistake" => Some(ThoughtType::Mistake),
+        "correction" => Some(ThoughtType::Correction),
+        "lessonlearned" => Some(ThoughtType::LessonLearned),
+        "assumptioninvalidated" => Some(ThoughtType::AssumptionInvalidated),
+        "constraint" => Some(ThoughtType::Constraint),
+        "plan" => Some(ThoughtType::Plan),
+        "subgoal" => Some(ThoughtType::Subgoal),
+        "decision" => Some(ThoughtType::Decision),
+        "strategyshift" => Some(ThoughtType::StrategyShift),
+        "wonder" => Some(ThoughtType::Wonder),
+        "question" => Some(ThoughtType::Question),
+        "idea" => Some(ThoughtType::Idea),
+        "experiment" => Some(ThoughtType::Experiment),
+        "actiontaken" => Some(ThoughtType::ActionTaken),
+        "taskcomplete" => Some(ThoughtType::TaskComplete),
+        "checkpoint" => Some(ThoughtType::Checkpoint),
+        "statesnapshot" => Some(ThoughtType::StateSnapshot),
+        "handoff" => Some(ThoughtType::Handoff),
+        "summary" => Some(ThoughtType::Summary),
+        "reframe" => Some(ThoughtType::Reframe),
+        "surprise" => Some(ThoughtType::Surprise),
+        _ => None,
+    }
+}
+
+/// Parse a [`ThoughtRole`] from its `{:?}` (Debug) PascalCase representation.
+fn parse_thought_role_from_debug(input: &str) -> Option<ThoughtRole> {
+    let normalized: String = input
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_lowercase();
+    match normalized.as_str() {
+        "memory" => Some(ThoughtRole::Memory),
+        "workingmemory" => Some(ThoughtRole::WorkingMemory),
+        "summary" => Some(ThoughtRole::Summary),
+        "compression" => Some(ThoughtRole::Compression),
+        "checkpoint" => Some(ThoughtRole::Checkpoint),
+        "handoff" => Some(ThoughtRole::Handoff),
+        "audit" => Some(ThoughtRole::Audit),
+        "retrospective" => Some(ThoughtRole::Retrospective),
+        _ => None,
+    }
+}
+
+/// Find the byte position of the ` (` that begins the metadata block.
+///
+/// The metadata block always has `agent ` as its first token, so we search
+/// for the last ` (agent ` occurrence (handling edge cases where the thought
+/// content itself contains parentheses).
+fn find_metadata_start(s: &str) -> Option<usize> {
+    if !s.ends_with(')') {
+        return None;
+    }
+    let mut search_from = 0;
+    let mut last_found = None;
+    while let Some(rel_pos) = s[search_from..].find(" (") {
+        let abs_pos = search_from + rel_pos;
+        if s[abs_pos + 2..].starts_with("agent ") {
+            last_found = Some(abs_pos);
+        }
+        search_from = abs_pos + 1;
+    }
+    last_found
+}
+
+/// Parse a metadata block of the form:
+/// `agent alice; role Retrospective; importance 0.75; confidence 0.90; tags tag1, tag2`
+///
+/// Returns `(agent_id, role, importance, confidence, tags)`.
+fn parse_metadata_block(
+    meta: &str,
+) -> (Option<String>, ThoughtRole, f32, Option<f32>, Vec<String>) {
+    let mut agent_id: Option<String> = None;
+    let mut role = ThoughtRole::Memory;
+    let mut importance = 0.5_f32;
+    let mut confidence: Option<f32> = None;
+    let mut tags: Vec<String> = Vec::new();
+
+    for token in meta.split("; ") {
+        let token = token.trim();
+        if let Some(val) = token.strip_prefix("agent ") {
+            agent_id = Some(val.trim().to_string());
+        } else if let Some(val) = token.strip_prefix("role ") {
+            role = parse_thought_role_from_debug(val.trim()).unwrap_or(ThoughtRole::Memory);
+        } else if let Some(val) = token.strip_prefix("importance ") {
+            importance = val.trim().parse().unwrap_or(0.5);
+        } else if let Some(val) = token.strip_prefix("confidence ") {
+            confidence = val.trim().parse().ok();
+        } else if let Some(val) = token.strip_prefix("tags ") {
+            tags = val
+                .split(", ")
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+        }
+    }
+
+    (agent_id, role, importance, confidence, tags)
+}
+
+/// Parse a single MEMORY.md bullet line of the format:
+///
+/// ```text
+/// - [#N] TypeName: content (agent agent_id; role RoleName; importance 0.85; ...)
+/// ```
+///
+/// Returns `None` for any line that does not match the expected pattern.
+fn parse_memory_markdown_line(line: &str) -> Option<MarkdownThoughtLine> {
+    let line = line.trim();
+
+    // Strip leading "- [" prefix.
+    let rest = line.strip_prefix("- [")?;
+
+    // Skip past the index digit(s) and the closing "]".
+    let bracket_close = rest.find(']')?;
+    let after_bracket = rest.get(bracket_close + 1..)?.trim_start();
+
+    // Split on the first ": " to get "TypeName" and "content (meta...)".
+    let colon_pos = after_bracket.find(": ")?;
+    let type_name = &after_bracket[..colon_pos];
+    let content_and_meta = &after_bracket[colon_pos + 2..];
+
+    let thought_type = parse_thought_type_from_debug(type_name)?;
+
+    // Split content from metadata block.
+    let (content, agent_id, role, importance, confidence, tags) =
+        if let Some(meta_start) = find_metadata_start(content_and_meta) {
+            let content = content_and_meta[..meta_start].trim();
+            // Strip the leading " (" and trailing ")".
+            let meta_inner = &content_and_meta[meta_start + 2..content_and_meta.len() - 1];
+            let (agent_id, role, importance, confidence, tags) =
+                parse_metadata_block(meta_inner);
+            (content, agent_id, role, importance, confidence, tags)
+        } else {
+            (
+                content_and_meta.trim(),
+                None,
+                ThoughtRole::Memory,
+                0.5_f32,
+                None,
+                Vec::new(),
+            )
+        };
+
+    if content.is_empty() {
+        return None;
+    }
+
+    Some(MarkdownThoughtLine {
+        thought_type,
+        content: content.to_string(),
+        agent_id,
+        role,
+        importance,
+        confidence,
+        tags,
+    })
 }
 
 fn append_memory_section(

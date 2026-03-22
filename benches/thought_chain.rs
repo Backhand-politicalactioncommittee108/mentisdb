@@ -279,6 +279,58 @@ pub fn traversal(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark `import_from_memory_markdown` against a pre-generated markdown
+/// string containing 100 thoughts.
+///
+/// This measures the cost of parsing the MEMORY.md format plus 100 chain
+/// appends.
+pub fn bench_import_memory_markdown(c: &mut Criterion) {
+    let mut group = c.benchmark_group("import_memory_markdown");
+    group.measurement_time(std::time::Duration::from_secs(10));
+    group.warm_up_time(std::time::Duration::from_secs(3));
+
+    // Pre-build a 100-thought chain and export its markdown once.
+    // The benchmark measures only the import, not the export.
+    let build_markdown = || {
+        let dir = tempfile::Builder::new()
+            .prefix("mentisdb-bench-import-src-")
+            .tempdir()
+            .expect("failed to create tempdir for import benchmark source");
+        let adapter = BinaryStorageAdapter::for_chain_key(dir.path(), "import-src");
+        let mut src =
+            MentisDb::open_with_storage(Box::new(adapter)).expect("failed to open source chain");
+        populate_chain(&mut src, 100);
+        (src.to_memory_markdown(None), dir)
+    };
+
+    let (markdown, _src_dir) = build_markdown();
+
+    group.throughput(criterion::Throughput::Elements(100));
+    group.bench_function("import_100_thoughts", |b| {
+        b.iter_batched(
+            || {
+                let dir = tempfile::Builder::new()
+                    .prefix("mentisdb-bench-import-dst-")
+                    .tempdir()
+                    .expect("failed to create tempdir for import benchmark destination");
+                let adapter = BinaryStorageAdapter::for_chain_key(dir.path(), "import-dst");
+                let chain = MentisDb::open_with_storage(Box::new(adapter))
+                    .expect("failed to open destination chain");
+                (chain, dir)
+            },
+            |(mut chain, _dir)| {
+                let indices = chain
+                    .import_from_memory_markdown(black_box(&markdown), "bench-agent")
+                    .expect("import_100_thoughts: import failed");
+                black_box(indices.len());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
 // ---------------------------------------------------------------------------
 // Criterion wiring
 // ---------------------------------------------------------------------------
@@ -288,6 +340,7 @@ criterion_group!(
     bench_append_single,
     bench_append_batch,
     query_latency,
-    traversal
+    traversal,
+    bench_import_memory_markdown
 );
 criterion_main!(benches);

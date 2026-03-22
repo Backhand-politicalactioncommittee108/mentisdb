@@ -127,6 +127,11 @@ pub(crate) fn dashboard_router(state: DashboardState) -> Router {
             "/agents/{chain_key}/{agent_id}/memory-markdown",
             get(api_agent_memory_markdown),
         )
+        // Bulk import from MEMORY.md format
+        .route(
+            "/chains/{chain_key}/import-markdown",
+            post(api_import_markdown),
+        )
         // Copy agent memories to another chain
         .route(
             "/agents/{chain_key}/{agent_id}/copy-to/{target_chain_key}",
@@ -350,6 +355,7 @@ fn parse_thought_type(s: &str) -> Option<ThoughtType> {
         "StateSnapshot" => Some(ThoughtType::StateSnapshot),
         "Handoff" => Some(ThoughtType::Handoff),
         "Summary" => Some(ThoughtType::Summary),
+        "Reframe" => Some(ThoughtType::Reframe),
         "Surprise" => Some(ThoughtType::Surprise),
         _ => None,
     }
@@ -1025,6 +1031,48 @@ async fn api_agent_memory_markdown(
     let filename = format!("{}_{}_AGENT.md", safe(&agent_id), safe(&chain_key));
 
     Ok(Json(json!({ "markdown": markdown, "filename": filename })))
+}
+
+/// Request body for `POST /dashboard/api/chains/{chain_key}/import-markdown`.
+#[derive(Debug, Deserialize)]
+struct ImportMarkdownBody {
+    /// MEMORY.md formatted markdown content to import.
+    markdown: String,
+    /// Agent ID to use when a parsed line contains no `agent` token.
+    /// Defaults to `"default"` when absent.
+    default_agent_id: Option<String>,
+}
+
+/// `POST /dashboard/api/chains/{chain_key}/import-markdown`
+///
+/// Import a MEMORY.md-formatted markdown string into the specified chain,
+/// appending each successfully-parsed thought.  Lines that do not match the
+/// expected bullet format are silently skipped.
+///
+/// # Request body
+///
+/// ```json
+/// { "markdown": "...", "default_agent_id": "agent-123" }
+/// ```
+///
+/// # Response
+///
+/// ```json
+/// { "imported": [0, 1, 2], "count": 3 }
+/// ```
+async fn api_import_markdown(
+    State(state): State<DashboardState>,
+    Path(chain_key): Path<String>,
+    Json(body): Json<ImportMarkdownBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let arc = get_or_open_chain(&state, &chain_key).await?;
+    let mut chain = arc.write().await;
+    let default_agent_id = body.default_agent_id.as_deref().unwrap_or("default");
+    let imported = chain
+        .import_from_memory_markdown(&body.markdown, default_agent_id)
+        .map_err(internal_error)?;
+    let count = imported.len();
+    Ok(Json(json!({ "imported": imported, "count": count })))
 }
 
 /// `POST /dashboard/api/agents/{chain_key}/{agent_id}/copy-to/{target_chain_key}`

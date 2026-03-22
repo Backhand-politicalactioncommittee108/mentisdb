@@ -132,7 +132,7 @@ const SKILL_SAFETY_WARNINGS: [&str; 4] = [
 ///     .with_on_thought_appended(Arc::new(|thought_type: ThoughtType| {
 ///         // E.g. play an audio chime in the daemon — blocking I/O is safe here
 ///         // because the callback runs inside `tokio::task::spawn_blocking`.
-///         eprintln!("💡 new thought committed: {thought_type}");
+///         eprintln!("💡 new thought committed: {thought_type:?}");
 ///     }));
 ///
 ///     // 2. Turn config into an Axum router
@@ -380,7 +380,7 @@ impl MentisDbServiceConfig {
     /// )
     /// .with_on_thought_appended(Arc::new(|thought_type: ThoughtType| {
     ///     // This runs in a blocking thread — safe for slow I/O
-    ///     eprintln!("🧠 committed: {thought_type}");
+    ///     eprintln!("🧠 committed: {thought_type:?}");
     /// }));
     /// assert!(config.on_thought_appended.is_some());
     /// ```
@@ -1362,6 +1362,7 @@ fn rest_router_with_service(service: Arc<MentisDbService>) -> Router {
         .route("/v1/search", post(rest_search_handler))
         .route("/v1/recent-context", post(rest_recent_context_handler))
         .route("/v1/memory-markdown", post(rest_memory_markdown_handler))
+        .route("/v1/import-markdown", post(rest_import_markdown_handler))
         .route("/v1/thought", post(rest_get_thought_handler))
         .route("/v1/thoughts/genesis", post(rest_genesis_thought_handler))
         .route(
@@ -1583,6 +1584,7 @@ pub fn rest_router(config: MentisDbServiceConfig) -> Router {
         .route("/v1/search", post(rest_search_handler))
         .route("/v1/recent-context", post(rest_recent_context_handler))
         .route("/v1/memory-markdown", post(rest_memory_markdown_handler))
+        .route("/v1/import-markdown", post(rest_import_markdown_handler))
         .route("/v1/thought", post(rest_get_thought_handler))
         .route("/v1/thoughts/genesis", post(rest_genesis_thought_handler))
         .route(
@@ -1783,6 +1785,9 @@ impl ToolProtocol for MentisDbMcpProtocol {
             }
             "mentisdb_memory_markdown" => {
                 parse_and_call(parameters, |request| self.service.memory_markdown(request)).await
+            }
+            "mentisdb_import_memory_markdown" => {
+                parse_and_call(parameters, |request| self.service.import_markdown(request)).await
             }
             "mentisdb_get_thought" => {
                 parse_and_call(parameters, |request| self.service.get_thought(request)).await
@@ -2462,6 +2467,36 @@ impl MentisDbService {
             chain.to_memory_markdown(Some(&query))
         };
         Ok(MemoryMarkdownResponse { markdown })
+    }
+
+    /// Import thoughts from a MEMORY.md-formatted markdown string and append
+    /// them to the target chain.
+    async fn import_markdown(
+        &self,
+        request: ImportMarkdownRequest,
+    ) -> Result<ImportMarkdownResponse, Box<dyn Error + Send + Sync>> {
+        let chain_key = self.resolve_chain_key(request.chain_key.as_deref());
+        let chain_arc = self.get_chain(Some(&chain_key), None).await?;
+        let mut chain = chain_arc.write().await;
+        let default_agent_id = request.default_agent_id.as_deref().unwrap_or("default");
+        let imported = chain.import_from_memory_markdown(&request.markdown, default_agent_id)?;
+        let count = imported.len();
+        self.log_interaction(InteractionLogEntry {
+            access: "write",
+            operation: "import_markdown",
+            chain_key,
+            metadata: InteractionMetadata {
+                agent_ids: vec![],
+                agent_names: vec![],
+                thought_types: vec![],
+                roles: vec![],
+                tags: vec![],
+                concepts: vec![],
+            },
+            result_count: Some(count),
+            note: None,
+        });
+        Ok(ImportMarkdownResponse { imported, count })
     }
 
     async fn get_thought(
@@ -3448,6 +3483,28 @@ struct MemoryMarkdownResponse {
     markdown: String,
 }
 
+/// Request body for [`rest_import_markdown_handler`] and the
+/// `import_memory_markdown` MCP tool.
+#[derive(Debug, Deserialize)]
+struct ImportMarkdownRequest {
+    /// Target chain key. Uses the server default when omitted.
+    chain_key: Option<String>,
+    /// MEMORY.md formatted markdown content to import.
+    markdown: String,
+    /// Agent ID to attribute thoughts to when a parsed line contains no
+    /// `agent` token in its metadata. Defaults to `"default"` when omitted.
+    default_agent_id: Option<String>,
+}
+
+/// Response for a successful markdown import.
+#[derive(Debug, Serialize)]
+struct ImportMarkdownResponse {
+    /// Append-order indices of all successfully imported thoughts.
+    imported: Vec<u64>,
+    /// Convenience count equal to `imported.len()`.
+    count: usize,
+}
+
 #[derive(Debug, Serialize)]
 struct SkillMarkdownResponse {
     markdown: String,
@@ -3731,6 +3788,18 @@ async fn rest_memory_markdown_handler(
     Json(request): Json<MemoryMarkdownRequest>,
 ) -> Result<Json<MemoryMarkdownResponse>, (StatusCode, Json<Value>)> {
     service_call(service.memory_markdown(request).await)
+}
+
+/// `POST /v1/import-markdown`
+///
+/// Import a MEMORY.md-formatted markdown string into the target chain,
+/// appending each parsed thought.  Malformed or unrecognised lines are
+/// silently skipped.
+async fn rest_import_markdown_handler(
+    State(service): State<Arc<MentisDbService>>,
+    Json(request): Json<ImportMarkdownRequest>,
+) -> Result<Json<ImportMarkdownResponse>, (StatusCode, Json<Value>)> {
+    service_call(service.import_markdown(request).await)
 }
 
 async fn rest_get_thought_handler(
@@ -4095,6 +4164,13 @@ fn mcp_tool_metadata() -> Vec<ToolMetadata> {
         .with_parameter(ToolParameter::new("since", ToolParameterType::String).with_description("Optional RFC 3339 lower timestamp bound."))
         .with_parameter(ToolParameter::new("until", ToolParameterType::String).with_description("Optional RFC 3339 upper timestamp bound."))
         .with_parameter(ToolParameter::new("limit", ToolParameterType::Integer).with_description("Optional maximum number of thoughts.")),
+        ToolMetadata::new(
+            "mentisdb_import_memory_markdown",
+            "Import a MEMORY.md formatted markdown string into the target chain. Parsed thoughts are appended; malformed lines are skipped. Returns the imported thought indices.",
+        )
+        .with_parameter(ToolParameter::new("markdown", ToolParameterType::String).with_description("MEMORY.md formatted markdown to import.").required())
+        .with_parameter(ToolParameter::new("chain_key", ToolParameterType::String).with_description("Target chain key. Uses the server default when omitted."))
+        .with_parameter(ToolParameter::new("default_agent_id", ToolParameterType::String).with_description("Agent ID to use when not specified in the markdown.")),
         ToolMetadata::new(
             "mentisdb_get_thought",
             "Return one committed thought by stable UUID, hash, or append-order index.",
@@ -4498,6 +4574,7 @@ fn parse_thought_type(input: &str) -> Result<ThoughtType, Box<dyn Error + Send +
         "statesnapshot" => ThoughtType::StateSnapshot,
         "handoff" => ThoughtType::Handoff,
         "summary" => ThoughtType::Summary,
+        "reframe" => ThoughtType::Reframe,
         "surprise" => ThoughtType::Surprise,
         _ => return Err(format!("Unknown ThoughtType '{input}'").into()),
     };
@@ -4684,6 +4761,7 @@ fn canonical_tool_name(tool_name: &str) -> &str {
         "thoughtchain_disable_agent" => "mentisdb_disable_agent",
         "thoughtchain_recent_context" => "mentisdb_recent_context",
         "thoughtchain_memory_markdown" => "mentisdb_memory_markdown",
+        "thoughtchain_import_memory_markdown" => "mentisdb_import_memory_markdown",
         "thoughtchain_get_thought" => "mentisdb_get_thought",
         "thoughtchain_get_genesis_thought" => "mentisdb_get_genesis_thought",
         "thoughtchain_traverse_thoughts" => "mentisdb_traverse_thoughts",

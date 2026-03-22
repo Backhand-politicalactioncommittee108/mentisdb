@@ -8,7 +8,7 @@
 //! Configuration is read from environment variables:
 //!
 //! - `MENTISDB_DIR`
-//! - `MENTISDB_DEFAULT_KEY`
+//! - `MENTISDB_DEFAULT_CHAIN_KEY` (deprecated alias: `MENTISDB_DEFAULT_KEY`)
 //! - `MENTISDB_DEFAULT_STORAGE_ADAPTER` (alias: `MENTISDB_STORAGE_ADAPTER`)
 //! - `MENTISDB_AUTO_FLUSH` (defaults to `true`; set `false` for buffered writes)
 //! - `MENTISDB_VERBOSE` (defaults to `true` when unset)
@@ -380,7 +380,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Some(config.service.chain_dir.display().to_string()),
     );
     print_env_var(
-        "MENTISDB_DEFAULT_KEY",
+        "MENTISDB_DEFAULT_CHAIN_KEY",
         Some(config.service.default_chain_key.clone()),
     );
     print_env_var(

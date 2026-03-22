@@ -1,3 +1,9 @@
+0.5.1.1 MAR/22/2026
+ - deprecate(config): rename MENTISDB_DEFAULT_KEY to MENTISDB_DEFAULT_CHAIN_KEY
+   - New canonical env var is MENTISDB_DEFAULT_CHAIN_KEY
+   - MENTISDB_DEFAULT_KEY remains fully functional as a deprecated alias (backwards compatible)
+   - Updated .env.example, start_mentisdbd, README.md, and rustdocs
+
 0.5.1.0 MAR/21/2026
  - feat(dashboard): agent thoughts explorer
    - Per-agent detail page now includes cross-chain links: "All <DisplayName>'s thoughts on <chain-key>" for every chain the agent participated in

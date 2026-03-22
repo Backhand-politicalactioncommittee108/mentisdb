@@ -228,8 +228,9 @@ Once startup completes, it prints:
 
 - `MENTISDB_DIR`
   Directory where MentisDB storage adapters store chain files.
-- `MENTISDB_DEFAULT_KEY`
-  Default `chain_key` used when requests omit one. Default: `borganism-brain`
+- `MENTISDB_DEFAULT_CHAIN_KEY`
+  Default `chain_key` used when requests omit one. Default: `borganism-brain`.
+  `MENTISDB_DEFAULT_KEY` is accepted as a deprecated alias.
 - `MENTISDB_DEFAULT_STORAGE_ADAPTER`
   Default storage backend for newly created chains. Supported values: `binary`, `jsonl`.
   Default: `binary`
@@ -260,7 +261,7 @@ Example — full durability (production default):
 
 ```bash
 MENTISDB_DIR=/tmp/mentisdb \
-MENTISDB_DEFAULT_KEY=borganism-brain \
+MENTISDB_DEFAULT_CHAIN_KEY=borganism-brain \
 MENTISDB_DEFAULT_STORAGE_ADAPTER=binary \
 MENTISDB_VERBOSE=true \
 MENTISDB_LOG_FILE=/tmp/mentisdb/mentisdbd.log \

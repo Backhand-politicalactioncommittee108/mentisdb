@@ -405,7 +405,7 @@ impl MentisDbServiceConfig {
 /// | Variable | Default | Description |
 /// |---|---|---|
 /// | `MENTISDB_DIR` | `~/.cloudllm/mentisdb` | Root directory for all chain storage. |
-/// | `MENTISDB_DEFAULT_KEY` | `borganism-brain` | Default chain key for requests that omit one. |
+/// | `MENTISDB_DEFAULT_CHAIN_KEY` | `borganism-brain` | Default chain key for requests that omit one. (`MENTISDB_DEFAULT_KEY` accepted as a deprecated alias.) |
 /// | `MENTISDB_DEFAULT_STORAGE_ADAPTER` / `MENTISDB_STORAGE_ADAPTER` | `binary` | Storage format for new chains (`binary` or `jsonl`). |
 /// | `MENTISDB_VERBOSE` | `true` | Log each operation to the `mentisdb::interaction` target. |
 /// | `MENTISDB_LOG_FILE` | *(none)* | Optional file path for interaction logs. |
@@ -457,7 +457,8 @@ impl MentisDbServiceConfig {
 pub struct MentisDbServerConfig {
     /// Shared storage and behaviour configuration used by every server variant.
     ///
-    /// This is constructed from `MENTISDB_DIR`, `MENTISDB_DEFAULT_KEY`,
+    /// This is constructed from `MENTISDB_DIR`, `MENTISDB_DEFAULT_CHAIN_KEY` (or the
+    /// deprecated `MENTISDB_DEFAULT_KEY`),
     /// `MENTISDB_DEFAULT_STORAGE_ADAPTER`, `MENTISDB_VERBOSE`,
     /// `MENTISDB_LOG_FILE`, and `MENTISDB_AUTO_FLUSH`.
     pub service: MentisDbServiceConfig,
@@ -600,7 +601,7 @@ impl MentisDbServerConfig {
                 env_var(&["MENTISDB_DIR"])
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| default_mentisdb_dir()),
-                env_var(&["MENTISDB_DEFAULT_KEY"])
+                env_var(&["MENTISDB_DEFAULT_CHAIN_KEY", "MENTISDB_DEFAULT_KEY"])
                     .unwrap_or_else(|_| "borganism-brain".to_string()),
                 storage_adapter,
             )

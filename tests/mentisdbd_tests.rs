@@ -53,6 +53,20 @@ fn cargo_install_args_target_the_requested_repo_tag_and_binary() {
 }
 
 #[test]
+fn update_dialog_box_contains_install_prompt_inside_the_frame() {
+    let lines = mentisdbd_impl::build_update_available_lines(
+        "0.6.0",
+        "0.6.1.14",
+        "https://github.com/CloudLLM-ai/mentisdb/releases/tag/0.6.1.14",
+    );
+    let dialog = mentisdbd_impl::build_ascii_notice_box("mentisdbd update available", &lines);
+
+    assert!(dialog.contains("mentisdbd update available"));
+    assert!(dialog.contains("Install release 0.6.1.14 and restart now? [Y/N]"));
+    assert!(dialog.contains("+"));
+}
+
+#[test]
 fn update_config_defaults_to_enabled_and_official_repo() {
     let _guard = env_lock();
     std::env::remove_var("MENTISDB_UPDATE_CHECK");
@@ -90,10 +104,7 @@ fn scheduler_spaces_bursts_without_overlap() {
     assert_eq!(second, 180 + mentisdbd_impl::THOUGHT_SOUND_GAP_MS);
     assert_eq!(
         third,
-        180
-            + mentisdbd_impl::THOUGHT_SOUND_GAP_MS
-            + 120
-            + mentisdbd_impl::THOUGHT_SOUND_GAP_MS
+        180 + mentisdbd_impl::THOUGHT_SOUND_GAP_MS + 120 + mentisdbd_impl::THOUGHT_SOUND_GAP_MS
             - 75
     );
 }

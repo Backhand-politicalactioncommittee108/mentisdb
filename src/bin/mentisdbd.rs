@@ -42,7 +42,7 @@ use std::process::Command;
 use std::sync::Arc;
 #[cfg(feature = "startup-sound")]
 use std::sync::{Mutex, OnceLock};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 const MENTIS_BANNER: &str = r#"███╗   ███╗███████╗███╗   ██╗████████╗██╗███████╗
 ████╗ ████║██╔════╝████╗  ██║╚══██╔══╝██║██╔════╝
@@ -361,20 +361,41 @@ fn normalize_release_tag_display(tag: &str) -> String {
     tag.trim().trim_start_matches(['v', 'V']).to_string()
 }
 
-fn ascii_notice_box(title: &str, lines: &[String]) {
+pub(crate) fn build_ascii_notice_box(title: &str, lines: &[String]) -> String {
     let width = std::iter::once(title.len())
         .chain(lines.iter().map(|line| line.len()))
         .max()
         .unwrap_or(0);
     let border = format!("+{}+", "-".repeat(width + 2));
-    println!();
-    println!("{YELLOW}{border}{RESET}");
-    println!("| {:<width$} |", title, width = width);
-    println!("{YELLOW}{border}{RESET}");
+    let mut output = String::new();
+    output.push('\n');
+    output.push_str(&format!("{YELLOW}{border}{RESET}\n"));
+    output.push_str(&format!("| {:<width$} |\n", title, width = width));
+    output.push_str(&format!("{YELLOW}{border}{RESET}\n"));
     for line in lines {
-        println!("| {:<width$} |", line, width = width);
+        output.push_str(&format!("| {:<width$} |\n", line, width = width));
     }
-    println!("{YELLOW}{border}{RESET}");
+    output.push_str(&format!("{YELLOW}{border}{RESET}\n"));
+    output
+}
+
+fn ascii_notice_box(title: &str, lines: &[String]) {
+    print!("{}", build_ascii_notice_box(title, lines));
+    let _ = io::stdout().flush();
+}
+
+pub(crate) fn build_update_available_lines(
+    current_version: &str,
+    latest_display: &str,
+    release_url: &str,
+) -> Vec<String> {
+    vec![
+        format!("Current core version: {current_version}"),
+        format!("Latest release tag : {latest_display}"),
+        format!("Release page       : {release_url}"),
+        String::new(),
+        format!("Install release {latest_display} and restart now? [Y/N]"),
+    ]
 }
 
 fn prompt_yes_no(prompt: &str) -> io::Result<bool> {
@@ -518,14 +539,17 @@ fn restart_installed_binary(
 async fn run_update_check_task(
     config: UpdateConfig,
     restart_tx: mpsc::UnboundedSender<RestartRequest>,
+    startup_ready: oneshot::Receiver<()>,
 ) {
     let latest = match fetch_latest_release(&config.repo).await {
         Ok(latest) => latest,
         Err(error) => {
+            let _ = startup_ready.await;
             println!("Update check failed: {error}");
             return;
         }
     };
+    let _ = startup_ready.await;
 
     let current_version = env!("CARGO_PKG_VERSION");
     if !release_tag_is_newer(&latest.tag_name, current_version) {
@@ -538,14 +562,9 @@ async fn run_update_check_task(
     }
 
     let latest_display = normalize_release_tag_display(&latest.tag_name);
-    ascii_notice_box(
-        "mentisdbd update available",
-        &[
-            format!("Current core version: {current_version}"),
-            format!("Latest release tag : {latest_display}"),
-            format!("Release page       : {}", latest.html_url),
-        ],
-    );
+    let dialog_lines =
+        build_update_available_lines(current_version, &latest_display, &latest.html_url);
+    ascii_notice_box("mentisdbd update available", &dialog_lines);
 
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         println!(
@@ -558,12 +577,7 @@ Run `cargo install --git https://github.com/{} --tag {} --locked --force --bin {
     }
 
     let should_update = match tokio::task::spawn_blocking({
-        let latest_display = latest_display.clone();
-        move || {
-            prompt_yes_no(&format!(
-                "Install release {latest_display} and restart mentisdbd now?"
-            ))
-        }
+        move || prompt_yes_no("Selection")
     })
     .await
     {
@@ -725,8 +739,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut handles = start_servers(config.clone()).await?;
     let update_config = update_config_from_env();
     let (restart_tx, mut restart_rx) = mpsc::unbounded_channel::<RestartRequest>();
+    let mut startup_ready_tx = None;
     if update_config.enabled {
-        tokio::spawn(run_update_check_task(update_config.clone(), restart_tx));
+        let (tx, rx) = oneshot::channel::<()>();
+        startup_ready_tx = Some(tx);
+        tokio::spawn(run_update_check_task(update_config.clone(), restart_tx, rx));
     }
 
     // ── Useful info first ────────────────────────────────────────────────────
@@ -905,6 +922,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let port = h.local_addr().port();
         let friendly = format!("https://my.mentisdb.com:{port}/dashboard");
         println!("  Dashboard    {local:<32}  {YELLOW}{friendly}{RESET}");
+    }
+    if let Some(tx) = startup_ready_tx.take() {
+        let _ = tx.send(());
     }
 
     tokio::select! {

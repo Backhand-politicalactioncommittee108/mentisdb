@@ -275,19 +275,17 @@ async fn deleting_a_cached_chain_does_not_reregister_it_on_last_drop() {
     assert!(state.chains.get("source").is_none());
     assert!(!storage_path.exists());
     assert!(!sidecar_path.exists());
-    assert!(load_registered_chains(&dir)
+    assert!(!load_registered_chains(&dir)
         .unwrap()
         .chains
-        .get("source")
-        .is_none());
+        .contains_key("source"));
 
     drop(survivor);
 
-    assert!(load_registered_chains(&dir)
+    assert!(!load_registered_chains(&dir)
         .unwrap()
         .chains
-        .get("source")
-        .is_none());
+        .contains_key("source"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

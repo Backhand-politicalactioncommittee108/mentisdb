@@ -576,21 +576,18 @@ Run `cargo install --git https://github.com/{} --tag {} --locked --force --bin {
         return;
     }
 
-    let should_update = match tokio::task::spawn_blocking({
-        move || prompt_yes_no("Selection")
-    })
-    .await
-    {
-        Ok(Ok(approved)) => approved,
-        Ok(Err(error)) => {
-            println!("Update prompt failed: {error}");
-            return;
-        }
-        Err(error) => {
-            println!("Update prompt failed: {error}");
-            return;
-        }
-    };
+    let should_update =
+        match tokio::task::spawn_blocking({ move || prompt_yes_no("Selection") }).await {
+            Ok(Ok(approved)) => approved,
+            Ok(Err(error)) => {
+                println!("Update prompt failed: {error}");
+                return;
+            }
+            Err(error) => {
+                println!("Update prompt failed: {error}");
+                return;
+            }
+        };
 
     if !should_update {
         println!("Update check: skipped update to {latest_display}.");

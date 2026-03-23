@@ -264,8 +264,8 @@ Once startup completes, it prints:
     significantly for multi-agent hubs with many concurrent writers.
   Supported values: `1`, `0`, `true`, `false`. Has no effect on the `jsonl` adapter.
 - `MENTISDB_UPDATE_CHECK`
-  Opt-in background GitHub release check for `mentisdbd`. Set `1`, `true`, `yes`, or `on`
-  to check for newer releases after startup. Default: `false`
+  Background GitHub release check for `mentisdbd`. Enabled by default; set `0`, `false`, `no`,
+  or `off` to disable update checks after startup. Default: `true`
 - `MENTISDB_UPDATE_REPO`
   Optional GitHub `owner/repo` override used by the updater. Default: `CloudLLM-ai/mentisdb`
 
@@ -294,22 +294,21 @@ MENTISDB_BIND_HOST=0.0.0.0 \
 mentisdbd
 ```
 
-### Opt-In Self-Update
+### Automatic Update Check
 
-`mentisdbd` can check GitHub releases in the background after startup and offer
+`mentisdbd` checks GitHub releases in the background after startup and can offer
 to update itself with `cargo install`.
 
-- checks are disabled by default
+- checks are enabled by default
 - version comparison uses only the first three numeric components, so a tag like
-  `0.6.0.13` is treated as core version `0.6.0`
+  `0.6.1.14` is treated as core version `0.6.1`
 - interactive terminals get an ASCII prompt window with `Y` / `N`
 - non-interactive terminals never block; they print the exact manual `cargo install` command instead
 
-Example:
+Disable the automatic check:
 
 ```bash
-MENTISDB_UPDATE_CHECK=1 \
-MENTISDB_UPDATE_REPO=CloudLLM-ai/mentisdb \
+MENTISDB_UPDATE_CHECK=0 \
 mentisdbd
 ```
 

@@ -20,7 +20,7 @@
 //! - `MENTISDB_HTTPS_REST_PORT` (set to 0 to disable; default 9474)
 //! - `MENTISDB_TLS_CERT` (default `~/.cloudllm/mentisdb/tls/cert.pem`)
 //! - `MENTISDB_TLS_KEY` (default `~/.cloudllm/mentisdb/tls/key.pem`)
-//! - `MENTISDB_UPDATE_CHECK` (default `false`; set `1`/`true`/`yes`/`on` to check GitHub releases in the background)
+//! - `MENTISDB_UPDATE_CHECK` (default `true`; set `0`/`false`/`no`/`off` to disable background GitHub release checks)
 //! - `MENTISDB_UPDATE_REPO` (default `CloudLLM-ai/mentisdb`)
 //! - `MENTISDB_STARTUP_SOUND` (default `true`; set `0`/`false`/`no`/`off` to silence)
 //! - `MENTISDB_THOUGHT_SOUNDS` (default `false`; set `1`/`true`/`yes`/`on` to enable per-thought sounds)
@@ -320,7 +320,7 @@ fn env_var_truthy(name: &str, default: bool) -> bool {
 
 pub(crate) fn update_config_from_env() -> UpdateConfig {
     UpdateConfig {
-        enabled: env_var_truthy("MENTISDB_UPDATE_CHECK", false),
+        enabled: env_var_truthy("MENTISDB_UPDATE_CHECK", true),
         repo: std::env::var("MENTISDB_UPDATE_REPO")
             .ok()
             .map(|value| value.trim().to_string())

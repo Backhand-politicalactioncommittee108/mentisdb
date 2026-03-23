@@ -53,24 +53,24 @@ fn cargo_install_args_target_the_requested_repo_tag_and_binary() {
 }
 
 #[test]
-fn update_config_defaults_to_opt_out_and_official_repo() {
+fn update_config_defaults_to_enabled_and_official_repo() {
     let _guard = env_lock();
     std::env::remove_var("MENTISDB_UPDATE_CHECK");
     std::env::remove_var("MENTISDB_UPDATE_REPO");
 
     let config = mentisdbd_impl::update_config_from_env();
-    assert!(!config.enabled);
+    assert!(config.enabled);
     assert_eq!(config.repo, mentisdbd_impl::DEFAULT_UPDATE_REPO);
 }
 
 #[test]
-fn update_config_respects_truthy_flag_and_trimmed_repo_override() {
+fn update_config_respects_false_flag_and_trimmed_repo_override() {
     let _guard = env_lock();
-    std::env::set_var("MENTISDB_UPDATE_CHECK", "yes");
+    std::env::set_var("MENTISDB_UPDATE_CHECK", "off");
     std::env::set_var("MENTISDB_UPDATE_REPO", "  example/mentisdb-fork  ");
 
     let config = mentisdbd_impl::update_config_from_env();
-    assert!(config.enabled);
+    assert!(!config.enabled);
     assert_eq!(config.repo, "example/mentisdb-fork");
 
     std::env::remove_var("MENTISDB_UPDATE_CHECK");

@@ -1,3 +1,9 @@
+0.6.1.14 MAR/23/2026
+ - change(daemon): enable update checks by default
+   - `MENTISDB_UPDATE_CHECK` now defaults to `true`
+   - Set `MENTISDB_UPDATE_CHECK=0` to disable the background GitHub release check
+   - Updated daemon regression tests and docs to reflect the new default-on behavior
+
 0.6.0.13 MAR/23/2026
  - feat(daemon): opt-in GitHub release update checks for `mentisdbd`
    - New `MENTISDB_UPDATE_CHECK=1` enables a background check against the latest GitHub release for `CloudLLM-ai/mentisdb`

@@ -16,7 +16,7 @@
    - Correct invocation: use the full path to the mcp-remote binary as the command
    - MCP endpoint is at POST / (root), not /mcp
 
-
+0.5.2.11 Mar/22/2026
  - feat: Reframe ThoughtType
    - New `ThoughtType::Reframe` variant for reframing thoughts that were accurate but unhelpfully framed
    - Distinct from Correction (factually wrong) and Invalidates (correct but stale)

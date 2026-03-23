@@ -1,4 +1,22 @@
-0.5.2.11 Mar/22/2026
+0.5.3.12 MAR/23/2026
+ - feat(branding): real MentisDB infinity-M logo
+   - Vectorized the official MentisDB logo (infinity/M mark) from JPEG source using potrace
+   - Produced white-on-transparent SVG at public/logo.svg (1.5 KB, 3 paths)
+   - mentisdb.com: replaced hand-drawn node-graph placeholder SVG in navbar and footer
+   - docs.mentisdb.com: added logo.svg to public/; navbar img replaces plain wordmark
+   - Dashboard: replaced 🧠 emoji in nav-brand with inline SVG data URI (embedded in binary, no external file)
+ - docs: Claude for Desktop MCP connection guide (all OSes)
+   - Documented that Claude for Desktop requires mcp-remote (npm install -g mcp-remote) as a bridge
+   - Per-OS config examples (macOS, Windows, Linux) with correct command paths
+   - NODE_TLS_REJECT_UNAUTHORIZED=0 env var required for self-signed cert; explained why and how to permanently trust the cert instead
+   - Added Linux config file path (~/.config/Claude/claude_desktop_config.json)
+   - Updated both README.md and docs.mentisdb.com user docs
+ - fix: mcp-remote Claude Desktop config
+   - node mcp-remote <url> is wrong (node tries to run a file named mcp-remote)
+   - Correct invocation: use the full path to the mcp-remote binary as the command
+   - MCP endpoint is at POST / (root), not /mcp
+
+
  - feat: Reframe ThoughtType
    - New `ThoughtType::Reframe` variant for reframing thoughts that were accurate but unhelpfully framed
    - Distinct from Correction (factually wrong) and Invalidates (correct but stale)

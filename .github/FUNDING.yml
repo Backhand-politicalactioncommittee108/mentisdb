@@ -1,0 +1,8 @@
+# MentisDB funding sources
+# Displayed as a "Sponsor this project" button on the repository page.
+
+github: gubatron
+
+custom:
+  - "https://www.paypal.com/donate?business=gubatron%40gmail.com"
+  - "https://etherscan.io/address/0xbcF4ce65d9a4df25f4016F800Ae79cc68892965e"

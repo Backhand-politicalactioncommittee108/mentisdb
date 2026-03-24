@@ -139,6 +139,39 @@ async fn agent_detail_form_hydrates_values_after_dom_insertion() {
 }
 
 #[tokio::test]
+async fn dashboard_chain_agent_counts_link_to_agent_sections() {
+    let dir = unique_chain_dir();
+    let router = dashboard_router_for_dir(&dir);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/dashboard")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let html = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8(html.to_vec()).unwrap();
+    assert!(html.contains("function agentListAnchorId(chainKey) {"));
+    assert!(html.contains("function agentListHash(chainKey) {"));
+    assert!(html.contains("else if (parts[0] === 'agents' && parts[1])             renderAgentList(decodeURIComponent(parts[1]));"));
+    assert!(html.contains(
+        r#"<td onclick="event.stopPropagation()"><a href="${agentListHash(c.chain_key)}""#
+    ));
+    assert!(html.contains(
+        r#"<div class="section-label" id="${agentListAnchorId(ck)}"><a href="${agentListHash(ck)}""#
+    ));
+    assert!(html.contains("target.scrollIntoView({ behavior: 'auto', block: 'start' });"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn dashboard_reads_latest_chain_and_agent_thoughts_without_restart() {
     let dir = unique_chain_dir();
     let mut chain =

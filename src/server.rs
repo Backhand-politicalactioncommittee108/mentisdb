@@ -179,11 +179,13 @@ pub struct MentisDbServiceConfig {
     /// parent directory is created automatically if it does not exist.
     /// Controlled by `MENTISDB_LOG_FILE` in the daemon.
     pub log_file: Option<PathBuf>,
-    /// Controls whether [`BinaryStorageAdapter`] chains flush to disk after
-    /// **every** append (`true`) or batch writes until a threshold is reached
+    /// Controls whether [`BinaryStorageAdapter`] chains use durable
+    /// group-commit acknowledgements (`true`) or buffered batched writes
     /// (`false`).
     ///
-    /// * `true` (default) — full per-write durability; at most zero thoughts are
+    /// * `true` (default) — every append waits for the background writer to
+    ///   flush it durably before returning. Concurrent appends may share a
+    ///   short group-commit window, but at most zero acknowledged thoughts are
     ///   lost on a hard crash.
     /// * `false` — writes are queued to a bounded background worker and flushed
     ///   in batches. This increases throughput for high-frequency multi-agent
@@ -324,8 +326,10 @@ impl MentisDbServiceConfig {
 
     /// Override the per-write durability setting for chain storage adapters.
     ///
-    /// * `true` (default) — every append is immediately flushed to the OS page
-    ///   cache. At most zero committed thoughts are lost on a hard crash.
+    /// * `true` (default) — every append waits for the background writer to
+    ///   flush it durably before returning. Concurrent appends may share a
+    ///   short group-commit window, but at most zero acknowledged thoughts are
+    ///   lost on a hard crash.
     /// * `false` — writes are queued to a bounded background worker; the
     ///   [`BinaryStorageAdapter`] flushes batches roughly every
     ///   `FLUSH_THRESHOLD` appends. This trades durability for significantly

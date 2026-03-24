@@ -1247,6 +1247,32 @@ fn mentisdb_switching_back_to_auto_flush_drains_background_writer() {
 }
 
 #[test]
+fn mentisdb_auto_flush_true_persists_before_drop_via_group_commit() {
+    let dir = unique_chain_dir();
+    let chain_key = "durable-group-commit";
+
+    let mut chain = MentisDb::open_with_key(&dir, chain_key).unwrap();
+    chain.set_auto_flush(true).unwrap();
+    chain
+        .append(
+            "agent1",
+            ThoughtType::Checkpoint,
+            "Durably acknowledged before drop.",
+        )
+        .unwrap();
+
+    let reloaded = MentisDb::open_with_key(&dir, chain_key).unwrap();
+    assert_eq!(reloaded.thoughts().len(), 1);
+    assert_eq!(
+        reloaded.thoughts()[0].content,
+        "Durably acknowledged before drop."
+    );
+
+    drop(chain);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn mentisdb_buffered_auto_flush_false_flushes_agent_registry_metadata_on_drop() {
     let dir = unique_chain_dir();
     let chain_key = "buffered-agent-registry";

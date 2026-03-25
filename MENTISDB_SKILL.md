@@ -252,13 +252,38 @@ Write with stable identity:
 
 Do not casually change producer identity. If prior identity was wrong, write a `Correction` that establishes the canonical identity.
 
+Prefer reusing an existing specialist identity over creating a new one.
+
+Before inventing a new `agent_id`, check whether the chain already has an agent whose role matches the work:
+
+1. call `mentisdb_list_agents` or `mentisdb_list_agent_registry`
+2. shortlist agent ids whose display name, description, aliases, or prior work match the current task
+3. search or traverse that agent's memories using `agent_ids`, `agent_names`, `thought_types`, `roles`, `tags_any`, and `concepts_any`
+4. if multiple candidates fit, read the best few and pick the one whose durable memory most closely matches the work you are about to do
+5. only create or register a brand-new agent identity if:
+   - the user explicitly asked for a new persona or agent
+   - no existing identity is a good semantic fit
+   - reusing an existing identity would blur an important boundary of ownership or meaning
+
+Default rule:
+
+- Rust backend work should usually reuse the best existing Rust/backend specialist on the chain.
+- Dashboard/frontend work should usually reuse the best existing dashboard/frontend specialist on the chain.
+- PM/orchestration work should usually reuse the established PM identity on the chain.
+
+Identity reuse keeps the chain dense and useful. Sharding memories across many near-duplicate agent ids makes retrieval weaker and fleet retrospectives noisier.
+
 ## Session Start Patterns
 
 Two distinct Summary patterns bookend every session. Both are important.
 
 ### Bootstrap Memory (First-Ever Join)
 
-When an agent joins a chain for the first time, write a `Summary` thought that captures:
+Only do this when the identity is truly new to the chain.
+
+If you reused an existing specialist identity, do **not** write a fresh bootstrap just because the current process instance is new. Load that identity's memories and continue from them.
+
+When an agent identity joins a chain for the first time, write a `Summary` thought that captures:
 
 - who the agent is (role, owner, project context)
 - the current project state as the agent understands it
@@ -889,7 +914,7 @@ One agent takes the role of **project manager** (PM). The PM is typically the lo
 - Write durable checkpoints, decisions, and lessons to MentisDB after each wave
 - Re-brief agents that resume after a context reset
 
-The PM should **register itself in the agent registry** so its thoughts are attributable:
+The PM should reuse the established PM identity on the chain when one already exists. If there is no suitable PM identity yet, register one so its thoughts are attributable:
 
 ```
 mentisdb_upsert_agent(
@@ -899,7 +924,16 @@ mentisdb_upsert_agent(
 )
 ```
 
-**Also pre-register every sub-agent before dispatching it.** If a sub-agent writes thoughts before you register it, those thoughts will appear under an unregistered identity. Pre-registration takes one call per agent and costs nothing:
+Do **not** casually mint a new sub-agent identity for every worker process.
+
+Default fleet protocol:
+
+1. search the chain for an existing specialist identity that matches the task
+2. reuse that identity when the match is good
+3. load its recent context and targeted memories
+4. only then create or pre-register a new identity if the chain truly lacks the role or the user asked for a distinct persona
+
+If a truly new specialist identity is needed, pre-register it before dispatch so its thoughts do not land under an unregistered producer:
 
 ```
 mentisdb_upsert_agent(
@@ -909,7 +943,7 @@ mentisdb_upsert_agent(
 )
 ```
 
-Do this in the same turn you dispatch the agent. Registered agents are searchable by display name and description in the agent registry, making fleet retrospectives cleaner.
+Do this in the same turn you dispatch the agent. But remember: reuse first, register new identities second. Registered agents are searchable by display name and description in the agent registry, making fleet retrospectives cleaner.
 
 The PM writes `Summary`, `Decision`, `Constraint`, `Mistake`, and `Wonder` thoughts throughout the session. These are not just logs — they are the PM's persistent identity across sessions.
 
@@ -922,6 +956,8 @@ mentisdb_recent_context(last_n=30)
 ```
 
 This gives every agent the same recent decisions, active constraints, and lessons learned. Each agent then works from a consistent baseline without needing to be briefed in the prompt.
+
+When you reuse an existing specialist identity, also load a targeted slice of that specialist's durable memory rather than only the global recent context. In many cases this is more valuable than a generic fleet-wide reload.
 
 For large fleets (10+ agents), consider assigning **different memory slices** to different agents rather than identical context to all — diversity of context produces more varied and complementary output than redundancy.
 
@@ -1228,7 +1264,8 @@ A well-maintained chain lets any new agent spin up, call `mentisdb_recent_contex
 - Loading all agents with identical context when diverse slices would be more valuable.
 - Leaving lessons in agent output summaries instead of writing them to MentisDB.
 - Not registering the PM as an agent — its thoughts become unattributable noise.
-- **Not pre-registering sub-agents** — their thoughts accumulate in the chain under an unregistered identity, making the Agent Registry misleading and retrospective attribution hard. Call `upsert_agent` for each sub-agent before (or in the same turn as) dispatch.
+- **Creating a fresh agent identity when an existing specialist identity already fits** — this shards memory across near-duplicate producers and makes retrieval weaker. Reuse the best matching existing identity unless the user asked for a new one or the chain genuinely lacks the role.
+- **When a truly new identity is required, not pre-registering it** — its thoughts accumulate in the chain under an unregistered identity, making the Agent Registry misleading and retrospective attribution hard. Call `upsert_agent` before (or in the same turn as) dispatch for genuinely new identities.
 - Waiting for all agents to finish before dispatching the next wave — dispatch as soon as dependencies clear.
 - Treating context window exhaustion as a hard stop rather than a checkpoint trigger.
 - Dispatching two agents to modify the **same call site** in the same file without agreeing on the final API signature first — one agent will leave its changes commented-out waiting for the other. Fix: define the agreed interface contract explicitly in both prompts before dispatching; instruct agents they may reference the agreed target API even if it doesn't compile yet.

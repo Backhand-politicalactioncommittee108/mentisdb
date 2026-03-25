@@ -12,6 +12,7 @@ pub mod cli;
 pub(crate) mod dashboard;
 pub mod integrations;
 pub mod paths;
+pub mod search;
 #[cfg(feature = "server")]
 pub mod server;
 mod skills;
@@ -2140,6 +2141,110 @@ impl ThoughtQuery {
     }
 }
 
+/// Ranking backend used to order ranked-search results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RankedSearchBackend {
+    /// In-process lexical scoring over thought and agent-registry text.
+    Lexical,
+    /// Metadata-only fallback when no ranked text query is provided.
+    Heuristic,
+}
+
+impl RankedSearchBackend {
+    /// Return the stable lowercase name of this backend.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lexical => "lexical",
+            Self::Heuristic => "heuristic",
+        }
+    }
+}
+
+/// Request for ranked retrieval over committed thoughts.
+///
+/// Ranked search is additive. The embedded [`ThoughtQuery`] still applies the
+/// same filter semantics as [`MentisDb::query`]; ranked search only changes how
+/// the matching candidates are ordered and trimmed.
+#[derive(Debug, Clone)]
+pub struct RankedSearchQuery {
+    /// Deterministic semantic filter applied before ranked ordering.
+    pub filter: ThoughtQuery,
+    /// Optional lexical text query used for ranked scoring.
+    pub text: Option<String>,
+    /// Maximum number of ranked hits to return.
+    pub limit: usize,
+}
+
+impl RankedSearchQuery {
+    /// Create an empty ranked-search request.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Apply a deterministic semantic filter before ranking.
+    pub fn with_filter(mut self, filter: ThoughtQuery) -> Self {
+        self.filter = filter;
+        self
+    }
+
+    /// Set the ranked lexical query text.
+    pub fn with_text(mut self, text: impl Into<String>) -> Self {
+        self.text = Some(text.into());
+        self
+    }
+
+    /// Limit the number of ranked hits returned.
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = limit.max(1);
+        self
+    }
+}
+
+impl Default for RankedSearchQuery {
+    fn default() -> Self {
+        Self {
+            filter: ThoughtQuery::new(),
+            text: None,
+            limit: 10,
+        }
+    }
+}
+
+/// Score breakdown for one ranked-search hit.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RankedSearchScore {
+    /// Score contributed by lexical matching.
+    pub lexical: f32,
+    /// Score contributed by the thought's importance value.
+    pub importance: f32,
+    /// Score contributed by the thought's confidence value.
+    pub confidence: f32,
+    /// Small recency tie-breaker derived from append order.
+    pub recency: f32,
+    /// Final combined score used for ranking.
+    pub total: f32,
+}
+
+/// One ranked-search hit.
+#[derive(Debug, Clone)]
+pub struct RankedSearchHit<'a> {
+    /// Matching thought.
+    pub thought: &'a Thought,
+    /// Score breakdown for this hit.
+    pub score: RankedSearchScore,
+}
+
+/// Ranked-search response over committed thoughts.
+#[derive(Debug, Clone)]
+pub struct RankedSearchResult<'a> {
+    /// Ranking backend used to score the hits.
+    pub backend: RankedSearchBackend,
+    /// Number of matching candidates considered after filtering and lexical gating.
+    pub total_candidates: usize,
+    /// Top ranked hits in descending score order.
+    pub hits: Vec<RankedSearchHit<'a>>,
+}
+
 /// Direction for append-order thought traversal.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "lowercase")]
@@ -3420,6 +3525,121 @@ impl MentisDb {
         }
 
         results
+    }
+
+    /// Query the chain with ranked ordering over the filtered candidates.
+    ///
+    /// Ranked search is additive: it first applies the embedded
+    /// [`ThoughtQuery`] with the same semantics as [`MentisDb::query`], then
+    /// reorders the matching candidates by lexical score (when `text` is
+    /// provided) or by lightweight metadata heuristics.
+    pub fn query_ranked(&self, request: &RankedSearchQuery) -> RankedSearchResult<'_> {
+        let candidates = self.query(&request.filter);
+        let ranked_text = request
+            .text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty());
+        let backend = ranked_text
+            .as_ref()
+            .map(|_| RankedSearchBackend::Lexical)
+            .unwrap_or(RankedSearchBackend::Heuristic);
+        let lexical_scores = ranked_text
+            .map(|text| self.rank_candidates_lexically(&candidates, text))
+            .unwrap_or_default();
+        let mut hits: Vec<RankedSearchHit<'_>> = candidates
+            .into_iter()
+            .filter_map(|thought| self.rank_search_hit(thought, ranked_text, &lexical_scores))
+            .collect();
+        let total_candidates = hits.len();
+
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .total
+                .total_cmp(&left.score.total)
+                .then_with(|| right.score.lexical.total_cmp(&left.score.lexical))
+                .then_with(|| right.thought.importance.total_cmp(&left.thought.importance))
+                .then_with(|| {
+                    right
+                        .thought
+                        .confidence
+                        .unwrap_or_default()
+                        .total_cmp(&left.thought.confidence.unwrap_or_default())
+                })
+                .then_with(|| right.thought.index.cmp(&left.thought.index))
+        });
+
+        if hits.len() > request.limit {
+            hits.truncate(request.limit);
+        }
+
+        RankedSearchResult {
+            backend,
+            total_candidates,
+            hits,
+        }
+    }
+
+    fn rank_search_hit<'a>(
+        &'a self,
+        thought: &'a Thought,
+        ranked_text: Option<&str>,
+        lexical_scores: &HashMap<usize, f32>,
+    ) -> Option<RankedSearchHit<'a>> {
+        let lexical = if ranked_text.is_some() {
+            let indexed_score = lexical_scores
+                .get(&(thought.index as usize))
+                .copied()
+                .unwrap_or_default();
+            if indexed_score == 0.0 {
+                return None;
+            }
+            indexed_score
+        } else {
+            0.0
+        };
+        let importance = thought.importance * 0.2;
+        let confidence = thought.confidence.unwrap_or_default() * 0.1;
+        let recency = self.recency_score(thought);
+        let total = lexical + importance + confidence + recency;
+
+        Some(RankedSearchHit {
+            thought,
+            score: RankedSearchScore {
+                lexical,
+                importance,
+                confidence,
+                recency,
+                total,
+            },
+        })
+    }
+
+    fn rank_candidates_lexically(
+        &self,
+        candidates: &[&Thought],
+        text: &str,
+    ) -> HashMap<usize, f32> {
+        let positions: Vec<usize> = candidates
+            .iter()
+            .map(|thought| thought.index as usize)
+            .collect();
+        let index = crate::search::lexical::LexicalIndex::build(&self.thoughts);
+        index
+            .search_in_positions(&crate::search::lexical::LexicalQuery::new(text), &positions)
+            .into_iter()
+            .map(|hit| (hit.doc_position, hit.score))
+            .collect()
+    }
+
+    fn recency_score(&self, thought: &Thought) -> f32 {
+        let newest_index = self.thoughts.len().saturating_sub(1);
+        if newest_index == 0 {
+            return 0.05;
+        }
+
+        (thought.index as f32 / newest_index as f32) * 0.05
     }
 
     fn indexed_candidate_positions(&self, query: &ThoughtQuery) -> Option<Vec<usize>> {

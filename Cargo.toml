@@ -1,6 +1,6 @@
 [package]
 name = "mentisdb"
-version = "0.6.4"
+version = "0.7.0"
 authors = ["Angel Leon <gubatron@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -27,6 +27,7 @@ serde_json = "1.0.149"
 diffy = "0.4"
 ed25519-dalek = { version = "2", features = ["alloc"] }
 sha2 = "0.10.9"
+toml_edit = "0.22.27"
 uuid = { version = "1.22.0", features = ["v4", "serde"] }
 mcp = { package = "cloudllm_mcp", version = "0.1.0" }
 axum = { version = "0.8.8", optional = true }
@@ -62,6 +63,10 @@ harness = false
 [[bench]]
 name = "http_concurrency"
 harness = false
+
+[[bin]]
+name = "mentisdb"
+path = "src/bin/mentisdb.rs"
 
 [[bin]]
 name = "mentisdbd"

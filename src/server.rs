@@ -73,7 +73,6 @@ use tokio::net::TcpListener;
 use tokio::sync::{oneshot, RwLock};
 use uuid::Uuid;
 
-const MENTISDB_DIRNAME: &str = "mentisdb";
 const LEGACY_THOUGHTCHAIN_DIRNAME: &str = "thoughtchain";
 const MENTISDB_REGISTRY_FILENAME: &str = "mentisdb-registry.json";
 const LEGACY_THOUGHTCHAIN_REGISTRY_FILENAME: &str = "thoughtchain-registry.json";
@@ -810,14 +809,7 @@ pub struct MentisDbServerHandles {
 /// assert!(dir.ends_with("mentisdb"));
 /// ```
 pub fn default_mentisdb_dir() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".cloudllm").join(MENTISDB_DIRNAME)
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(".cloudllm")
-            .join(MENTISDB_DIRNAME)
-    }
+    crate::paths::default_mentisdb_dir()
 }
 
 /// Return the default on-disk TLS directory for `mentisdbd` self-signed certificates.

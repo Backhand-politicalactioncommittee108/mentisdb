@@ -7,8 +7,11 @@
 //! chain model is intentionally independent from any single storage format.
 #![warn(missing_docs)]
 
+pub mod cli;
 #[cfg(feature = "server")]
 pub(crate) mod dashboard;
+pub mod integrations;
+pub mod paths;
 #[cfg(feature = "server")]
 pub mod server;
 mod skills;

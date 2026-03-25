@@ -64,6 +64,14 @@ harness = false
 name = "http_concurrency"
 harness = false
 
+[[bench]]
+name = "search_baseline"
+harness = false
+
+[[bench]]
+name = "search_ranked"
+harness = false
+
 [[bin]]
 name = "mentisdbd"
 path = "src/bin/mentisdbd.rs"

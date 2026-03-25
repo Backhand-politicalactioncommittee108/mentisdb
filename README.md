@@ -160,6 +160,8 @@ Results are also written to `/tmp/mentisdb_bench_results.txt` so numbers persist
 Benchmark coverage:
 
 - `benches/thought_chain.rs` — 10 benchmarks: append throughput, query latency, traversal patterns
+- `benches/search_baseline.rs` — 4 benchmarks: lexical/filter-first search baseline over content, registry text, indexed+text intersections, and newest-tail limits
+- `benches/search_ranked.rs` — 4 benchmarks: additive ranked retrieval over lexical content, filtered ranked queries, and heuristic fallback, plus a baseline append-order comparison
 - `benches/skill_registry.rs` — 12 benchmarks: skill upload, search, delta reconstruction, lifecycle
 - `benches/http_concurrency.rs` — starts `mentisdbd` in-process on a random port; measures write and read throughput at 100 / 1k / 10k concurrent Tokio tasks with p50/p95/p99 latency reporting
 
@@ -362,6 +364,123 @@ REST endpoints:
 - `POST /v1/skills/deprecate`
 - `POST /v1/skills/revoke`
 - `POST /v1/head`
+
+---
+
+## Search Semantics
+
+MentisDB's current thought search surface is **filter-first lexical retrieval**, not relevance-ranked retrieval.
+
+Today, the main search APIs are:
+
+- `MentisDb::query(&ThoughtQuery)`
+- `POST /v1/search`
+- `mentisdb_search`
+
+Current behavior:
+
+- indexed filters narrow the candidate set for `thought_type`, `role`, `agent_id`, tags, and concepts
+- `text` is a case-insensitive substring match over:
+  - thought `content`
+  - `agent_id`
+  - tags
+  - concepts
+  - agent-registry display name, aliases, owner, and description
+- results are returned in **append order**
+- `limit` keeps the **newest matching tail** after filtering rather than applying a ranking score
+
+That means current search is deterministic and explainable, but it is **not** BM25, hybrid, vector, or score-ranked retrieval.
+
+Examples:
+
+```rust,no_run
+use mentisdb::{MentisDb, ThoughtQuery, ThoughtType};
+use std::path::PathBuf;
+
+# fn main() -> std::io::Result<()> {
+let chain = MentisDb::open(&PathBuf::from("/tmp/tc_query"), "agent1", "Agent", None, None)?;
+
+let lexical = ThoughtQuery::new()
+    .with_types(vec![ThoughtType::Decision])
+    .with_tags_any(["search"])
+    .with_text("latency");
+
+let results = chain.query(&lexical);
+# let _ = results;
+# Ok(())
+# }
+```
+
+```json
+{
+  "chain_key": "mentisdb",
+  "thought_types": ["Decision"],
+  "tags_any": ["search"],
+  "text": "latency",
+  "limit": 20
+}
+```
+
+Design note:
+
+- treat this lexical/filter-first behavior as the baseline
+- add future ranked or hybrid search as a separate, explicitly documented surface
+- do not silently change the semantics of `ThoughtQuery` or `/v1/search` from append-order filtering to score-ranked retrieval
+
+The dedicated benchmark `benches/search_baseline.rs` and evaluation tests in `tests/search_eval_tests.rs` are intended to preserve that baseline while world-class search evolves.
+
+### Ranked Search
+
+MentisDB now also exposes an additive ranked-search surface for direct crate use:
+
+- `RankedSearchQuery`
+- `MentisDb::query_ranked(&RankedSearchQuery)`
+- `RankedSearchBackend::{Lexical, Heuristic}`
+
+This surface is intentionally separate from `ThoughtQuery`.
+
+`ThoughtQuery` still decides **which** thoughts are eligible. Ranked search then decides **how those eligible thoughts are ordered**.
+
+Current ranked-search behavior:
+
+- `RankedSearchQuery.filter` uses the same deterministic semantics as `MentisDb::query`
+- when `text` normalizes to a non-empty query, the backend is `lexical`
+- lexical ranking scores indexed thought text from the filtered candidate set
+- when `text` is absent or blank, the backend falls back to `heuristic`
+- heuristic ordering uses lightweight importance, confidence, and recency signals
+- `total_candidates` counts the hits after filter application and lexical gating, before final `limit` truncation
+
+Example:
+
+```rust,no_run
+use mentisdb::{MentisDb, RankedSearchQuery, ThoughtQuery, ThoughtType};
+use std::path::PathBuf;
+
+# fn main() -> std::io::Result<()> {
+let chain = MentisDb::open(&PathBuf::from("/tmp/tc_ranked"), "agent1", "Agent", None, None)?;
+
+let ranked = RankedSearchQuery::new()
+    .with_filter(
+        ThoughtQuery::new()
+            .with_types(vec![ThoughtType::Decision])
+            .with_tags_any(["search"]),
+    )
+    .with_text("latency ranking")
+    .with_limit(10);
+
+let results = chain.query_ranked(&ranked);
+# let _ = results;
+# Ok(())
+# }
+```
+
+Product rule:
+
+- keep `ThoughtQuery` stable and explainable for append-order filtering
+- evolve ranked search as a separate surface with its own benchmarks, tests, and transport layers
+- treat registry-aware filtering and future transport exposure as additive work on top of the current crate API
+
+The ranked-search benchmark `benches/search_ranked.rs` and evaluation tests in `tests/search_ranked_eval_tests.rs` are the guardrails for that additive surface.
 
 ---
 

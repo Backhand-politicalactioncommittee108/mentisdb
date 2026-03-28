@@ -55,6 +55,10 @@ Then start the daemon:
 mentisdbd
 ```
 
+On an interactive first run with no configured client integrations,
+`mentisdbd` offers to launch the setup wizard immediately after startup so you
+do not have to guess the next command.
+
 Run persistently after closing your SSH session:
 
 ```bash
@@ -990,8 +994,9 @@ claude mcp list
 claude mcp get mentisdb
 ```
 
-Claude Code also supports JSON config files such as `.mcp.json`. A MentisDB
-HTTP MCP config looks like this:
+`mentisdbd setup claude-code` merges the MCP server entry into
+`~/.claude/settings.json`, preserving your existing Claude Code settings. The
+MentisDB HTTP MCP block it writes looks like this:
 
 ```json
 {
@@ -1024,7 +1029,8 @@ From interactive mode:
 5. Leave headers empty unless you add auth later
 6. Save the config
 
-You can also configure it manually in `~/.copilot/mcp-config.json`:
+You can also configure it manually in `~/.copilot/mcp-config.json` (or
+`$XDG_CONFIG_HOME/copilot/mcp-config.json` when `XDG_CONFIG_HOME` is set):
 
 ```json
 {

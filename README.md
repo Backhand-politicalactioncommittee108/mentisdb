@@ -369,7 +369,7 @@ REST endpoints:
 
 ## Search Semantics
 
-MentisDB's current thought search surface is **filter-first lexical retrieval**, not relevance-ranked retrieval.
+MentisDB keeps its baseline thought search surface **filter-first and append-order**. Ranked, graph-aware, and vector retrieval are additive surfaces layered on top of that stable baseline.
 
 Today, the main search APIs are:
 
@@ -389,7 +389,7 @@ Current behavior:
 - results are returned in **append order**
 - `limit` keeps the **newest matching tail** after filtering rather than applying a ranking score
 
-That means current search is deterministic and explainable, but it is **not** BM25, hybrid, vector, or score-ranked retrieval.
+That means plain `ThoughtQuery` / `/v1/search` behavior is deterministic and explainable, but that baseline path is **not** BM25, hybrid, or vector retrieval. Additive ranked and graph-aware retrieval now exist on separate crate, REST, and MCP surfaces.
 
 Examples:
 
@@ -424,7 +424,7 @@ let results = chain.query(&lexical);
 Design note:
 
 - treat this lexical/filter-first behavior as the baseline
-- add future ranked or hybrid search as a separate, explicitly documented surface
+- keep ranked, vector, and future hybrid search as separate, explicitly documented surfaces
 - do not silently change the semantics of `ThoughtQuery` or `/v1/search` from append-order filtering to score-ranked retrieval
 
 The dedicated benchmark `benches/search_baseline.rs` and evaluation tests in `tests/search_eval_tests.rs` are intended to preserve that baseline while world-class search evolves.
@@ -521,6 +521,35 @@ Product rule:
 - use `query_ranked` for flat ranked retrieval and `query_context_bundles` when the caller wants seed-anchored support context instead of one mixed list
 
 The ranked-search benchmark `benches/search_ranked.rs` and evaluation tests in `tests/search_ranked_eval_tests.rs` are the guardrails for that additive surface.
+
+### Vector Sidecars
+
+MentisDB now exposes an additive Phase 3 vector sidecar surface for direct crate use:
+
+- `search::EmbeddingProvider`
+- `search::EmbeddingMetadata`
+- `search::VectorSidecar`
+- `VectorSearchQuery`
+- `MentisDb::vector_sidecar_path(&EmbeddingMetadata)`
+- `MentisDb::load_vector_sidecar(&EmbeddingMetadata)`
+- `MentisDb::vector_sidecar_freshness(&VectorSidecar, &EmbeddingMetadata)`
+- `MentisDb::rebuild_vector_sidecar(&provider)`
+- `MentisDb::query_vector(&provider, &VectorSearchQuery)`
+
+Contract:
+
+- embeddings remain optional, and MentisDB still works with no vector dependencies at all
+- vector state lives in a rebuildable sidecar, never in the canonical append-only chain
+- vector sidecars are separated by `chain_key`, `thought_id`, `thought_hash`, `model_id`, embedding dimension, and embedding version
+- changing the embedding model or version invalidates old vector state instead of silently mixing incompatible embeddings
+- vector hits surface whether they came from a `Fresh` or stale sidecar
+- deleting or corrupting the sidecar degrades only vector retrieval; plain chain reads, appends, and lexical/graph search still work
+
+Operational flow:
+
+- rebuild a sidecar explicitly for one provider and chain
+- load or query that sidecar later with the same embedding metadata
+- if the chain head changes, the sidecar becomes stale and results report that freshness state until the sidecar is rebuilt
 
 ### REST Lexical Search
 

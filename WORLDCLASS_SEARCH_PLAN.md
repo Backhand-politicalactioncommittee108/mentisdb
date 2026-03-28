@@ -12,8 +12,8 @@
 
 - Phase 1 is complete.
 - Phase 2 is complete in the core crate.
-- Phase 3 has not started.
-- Phase 4 is pending at the transport layer.
+- Phase 3 is complete in the core crate.
+- Phase 4 is complete at the transport layer.
 - Phase 5 is pending for final dashboard wiring to the ranked core path.
 
 ## Current Baseline
@@ -149,6 +149,8 @@ Turn seed retrieval into usable memory context by expanding across `refs` and `r
 
 ## Phase 3: Optional Embeddings And Vector Sidecar
 
+Status: complete in the core crate on `master` as of March 28, 2026.
+
 ### Objective
 
 Add true semantic retrieval without weakening append-only durability or making remote AI dependencies mandatory.
@@ -183,6 +185,15 @@ Add true semantic retrieval without weakening append-only durability or making r
 - The sidecar must never become the only copy of any meaning-bearing data.
 - Search results should surface whether a vector hit was produced from stale or fresh embeddings.
 
+### Acceptance Criteria
+
+- A chain with Phase 3 disabled behaves normally with lexical and graph retrieval only; no embedding dependency becomes mandatory.
+- Vector sidecar entries are separated by `chain_key`, `thought_id`, `thought_hash`, `model_id`, embedding dimension, and embedding version so incompatible embeddings cannot silently mix.
+- Changing `model_id` or embedding version invalidates old vector state and forces explicit rebuild rather than silently reusing stale vectors.
+- Rebuilding from the canonical chain recreates the sidecar without mutating durable thoughts or requiring any meaning-bearing data outside the chain.
+- Search results can tell callers whether a vector hit came from fresh or stale embeddings.
+- Sidecar corruption or deletion degrades semantic/vector retrieval only; it does not compromise append-only durability or non-vector search correctness.
+
 ### Deliverables
 
 - embedding job abstraction
@@ -198,6 +209,17 @@ Add true semantic retrieval without weakening append-only durability or making r
 
 - Worker 5 owns the sidecar persistence model and rebuild path.
 - Worker 6 owns the embedding provider abstraction and tests.
+
+### Landed Shape
+
+- `src/search/vector.rs` provides the provider abstraction, vector validation, cosine ranking, and deterministic in-process vector index.
+- `src/search/sidecar.rs` provides rebuildable sidecar persistence with integrity checks, freshness states, and model/version separation.
+- `MentisDb` exposes explicit additive methods to:
+  - compute deterministic sidecar paths
+  - rebuild sidecars from the canonical chain
+  - load sidecars
+  - report sidecar freshness
+  - run vector search without altering default `ThoughtQuery` behavior
 
 ## Phase 4: Hybrid Ranking API And MCP/REST Exposure
 

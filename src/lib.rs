@@ -2339,6 +2339,123 @@ pub struct RankedSearchResult<'a> {
     pub hits: Vec<RankedSearchHit<'a>>,
 }
 
+/// Request for vector similarity retrieval over committed thoughts.
+///
+/// This API is additive. The embedded [`ThoughtQuery`] still applies the same
+/// deterministic filter semantics as [`MentisDb::query`]; vector search only
+/// reorders the eligible thoughts that already have embeddings in the selected
+/// sidecar.
+#[derive(Debug, Clone)]
+pub struct VectorSearchQuery {
+    /// Deterministic semantic filter applied before vector ranking.
+    pub filter: ThoughtQuery,
+    /// Query text to embed in the selected embedding space.
+    pub text: String,
+    /// Maximum number of hits to return.
+    pub limit: usize,
+    /// Optional floor for cosine similarity scores.
+    pub min_score: Option<f32>,
+}
+
+impl VectorSearchQuery {
+    /// Create an empty vector-search request.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            filter: ThoughtQuery::new(),
+            text: text.into(),
+            limit: 10,
+            min_score: None,
+        }
+    }
+
+    /// Apply a deterministic semantic filter before vector ranking.
+    pub fn with_filter(mut self, filter: ThoughtQuery) -> Self {
+        self.filter = filter;
+        self
+    }
+
+    /// Limit the number of vector hits returned.
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = limit.max(1);
+        self
+    }
+
+    /// Ignore hits below a minimum cosine similarity score.
+    pub fn with_min_score(mut self, min_score: f32) -> Self {
+        self.min_score = Some(min_score);
+        self
+    }
+}
+
+/// One vector-search hit.
+#[derive(Debug, Clone)]
+pub struct VectorSearchHit<'a> {
+    /// Matching thought.
+    pub thought: &'a Thought,
+    /// Cosine similarity score for this hit.
+    pub score: f32,
+    /// Freshness state of the sidecar that produced this hit.
+    pub freshness: crate::search::VectorSidecarFreshness,
+}
+
+/// Vector-search response over committed thoughts.
+#[derive(Debug, Clone)]
+pub struct VectorSearchResult<'a> {
+    /// Embedding-space metadata used for the search.
+    pub metadata: crate::search::EmbeddingMetadata,
+    /// Freshness state of the sidecar used to serve this result.
+    pub freshness: crate::search::VectorSidecarFreshness,
+    /// Number of indexed candidates considered after filter application.
+    pub total_candidates: usize,
+    /// Top vector-ranked hits in descending cosine score order.
+    pub hits: Vec<VectorSearchHit<'a>>,
+}
+
+/// Failure while rebuilding or querying a vector sidecar.
+#[derive(Debug)]
+pub enum VectorSearchError<E> {
+    /// Building embeddings for the query or sidecar failed.
+    Embedding(crate::search::EmbeddingBuildError<E>),
+    /// Sidecar persistence failed.
+    Io(io::Error),
+    /// Vector-index validation or similarity search failed.
+    Index(crate::search::VectorIndexError),
+    /// The current chain does not expose stable persistence metadata.
+    MissingPersistenceMetadata,
+    /// No sidecar exists yet for the requested embedding space.
+    MissingSidecar(PathBuf),
+}
+
+impl<E: fmt::Display> fmt::Display for VectorSearchError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Embedding(error) => write!(f, "{error}"),
+            Self::Io(error) => write!(f, "{error}"),
+            Self::Index(error) => write!(f, "{error}"),
+            Self::MissingPersistenceMetadata => {
+                write!(
+                    f,
+                    "this MentisDb handle does not expose stable persistence metadata"
+                )
+            }
+            Self::MissingSidecar(path) => {
+                write!(f, "no vector sidecar exists at {}", path.display())
+            }
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for VectorSearchError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Embedding(error) => Some(error),
+            Self::Io(error) => Some(error),
+            Self::Index(error) => Some(error),
+            Self::MissingPersistenceMetadata | Self::MissingSidecar(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RankedGraphHit {
     best_hit: crate::search::GraphExpansionHit,
@@ -3754,6 +3871,211 @@ impl MentisDb {
         )
     }
 
+    /// Return the deterministic on-disk path for one vector sidecar.
+    pub fn vector_sidecar_path(
+        &self,
+        metadata: &crate::search::EmbeddingMetadata,
+    ) -> io::Result<PathBuf> {
+        let Some(persistence) = &self.persistence else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "this MentisDb handle does not expose stable persistence metadata",
+            ));
+        };
+
+        Ok(chain_vector_sidecar_path(
+            &persistence.chain_dir,
+            &persistence.chain_key,
+            persistence.storage_kind,
+            metadata,
+        ))
+    }
+
+    /// Load and integrity-check one vector sidecar for the requested embedding space.
+    pub fn load_vector_sidecar(
+        &self,
+        metadata: &crate::search::EmbeddingMetadata,
+    ) -> io::Result<Option<crate::search::VectorSidecar>> {
+        let path = self.vector_sidecar_path(metadata)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        crate::search::VectorSidecar::load_from_path(&path).map(Some)
+    }
+
+    /// Compare a loaded vector sidecar with the current chain state.
+    pub fn vector_sidecar_freshness(
+        &self,
+        sidecar: &crate::search::VectorSidecar,
+        metadata: &crate::search::EmbeddingMetadata,
+    ) -> io::Result<crate::search::VectorSidecarFreshness> {
+        let Some(persistence) = &self.persistence else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "this MentisDb handle does not expose stable persistence metadata",
+            ));
+        };
+
+        Ok(sidecar.freshness(
+            &persistence.chain_key,
+            self.thoughts.len(),
+            self.head_hash(),
+            metadata,
+        ))
+    }
+
+    /// Rebuild and persist the vector sidecar for one embedding provider.
+    pub fn rebuild_vector_sidecar<P: crate::search::EmbeddingProvider>(
+        &self,
+        provider: &P,
+    ) -> Result<crate::search::VectorSidecar, VectorSearchError<P::Error>> {
+        let Some(persistence) = &self.persistence else {
+            return Err(VectorSearchError::MissingPersistenceMetadata);
+        };
+        let path = chain_vector_sidecar_path(
+            &persistence.chain_dir,
+            &persistence.chain_key,
+            persistence.storage_kind,
+            provider.metadata(),
+        );
+        let inputs: Vec<crate::search::EmbeddingInput> = self
+            .thoughts
+            .iter()
+            .map(|thought| {
+                crate::search::EmbeddingInput::new(
+                    thought.id.to_string(),
+                    self.thought_embedding_text(thought),
+                )
+            })
+            .collect();
+        let documents = crate::search::embed_batch_to_documents(provider, &inputs)
+            .map_err(VectorSearchError::Embedding)?;
+        let entries: Vec<crate::search::VectorSidecarEntry> = self
+            .thoughts
+            .iter()
+            .zip(documents)
+            .map(|(thought, document)| {
+                crate::search::VectorSidecarEntry::new(
+                    thought.id,
+                    thought.index,
+                    thought.hash.clone(),
+                    document.vector,
+                )
+            })
+            .collect();
+        let sidecar = crate::search::VectorSidecar::build(
+            persistence.chain_key.clone(),
+            provider.metadata().clone(),
+            self.thoughts.len(),
+            self.head_hash().map(ToOwned::to_owned),
+            Utc::now(),
+            entries,
+        )
+        .map_err(VectorSearchError::Io)?;
+        sidecar.save_to_path(&path).map_err(VectorSearchError::Io)?;
+        Ok(sidecar)
+    }
+
+    /// Query a persisted vector sidecar with provider-generated query embeddings.
+    ///
+    /// This does not change default retrieval behavior. Callers must rebuild the
+    /// sidecar explicitly via [`MentisDb::rebuild_vector_sidecar`] before vector
+    /// search becomes available for a chain and embedding space.
+    pub fn query_vector<P: crate::search::EmbeddingProvider>(
+        &self,
+        provider: &P,
+        request: &VectorSearchQuery,
+    ) -> Result<VectorSearchResult<'_>, VectorSearchError<P::Error>> {
+        let metadata = provider.metadata().clone();
+        let sidecar_path =
+            self.vector_sidecar_path(&metadata)
+                .map_err(|error| match error.kind() {
+                    io::ErrorKind::Unsupported => VectorSearchError::MissingPersistenceMetadata,
+                    _ => VectorSearchError::Io(error),
+                })?;
+        let sidecar = self
+            .load_vector_sidecar(&metadata)
+            .map_err(VectorSearchError::Io)?
+            .ok_or_else(|| VectorSearchError::MissingSidecar(sidecar_path.clone()))?;
+        let freshness = self
+            .vector_sidecar_freshness(&sidecar, &metadata)
+            .map_err(VectorSearchError::Io)?;
+        let query_text = request.text.trim();
+        if query_text.is_empty() {
+            return Ok(VectorSearchResult {
+                metadata,
+                freshness,
+                total_candidates: 0,
+                hits: Vec::new(),
+            });
+        }
+
+        let mut embedded_query = crate::search::embed_batch_to_documents(
+            provider,
+            &[crate::search::EmbeddingInput::new("__query__", query_text)],
+        )
+        .map_err(VectorSearchError::Embedding)?;
+        let query_vector = embedded_query
+            .pop()
+            .map(|document| document.vector)
+            .unwrap_or_default();
+
+        let candidate_ids: HashSet<Uuid> = self
+            .query(&request.filter)
+            .into_iter()
+            .map(|thought| thought.id)
+            .collect();
+        let documents: Vec<crate::search::VectorDocument> = sidecar
+            .entries
+            .iter()
+            .filter(|entry| candidate_ids.contains(&entry.thought_id))
+            .map(|entry| {
+                crate::search::VectorDocument::new(
+                    entry.thought_id.to_string(),
+                    entry.vector.clone(),
+                )
+            })
+            .collect();
+        let total_candidates = documents.len();
+        if documents.is_empty() {
+            return Ok(VectorSearchResult {
+                metadata,
+                freshness,
+                total_candidates,
+                hits: Vec::new(),
+            });
+        }
+
+        let index = crate::search::VectorIndex::from_documents(metadata.clone(), documents)
+            .map_err(VectorSearchError::Index)?;
+        let mut hits = index
+            .search(&crate::search::VectorQuery::new(query_vector).with_limit(request.limit))
+            .map_err(VectorSearchError::Index)?;
+        if let Some(min_score) = request.min_score {
+            hits.retain(|hit| hit.score >= min_score);
+        }
+
+        let hits = hits
+            .into_iter()
+            .filter_map(|hit| {
+                let thought_id = Uuid::parse_str(&hit.document_id).ok()?;
+                let position = *self.id_to_index.get(&thought_id)?;
+                Some(VectorSearchHit {
+                    thought: &self.thoughts[position],
+                    score: hit.score,
+                    freshness: freshness.clone(),
+                })
+            })
+            .collect();
+
+        Ok(VectorSearchResult {
+            metadata,
+            freshness,
+            total_candidates,
+            hits,
+        })
+    }
+
     fn rank_search_hit<'a>(
         &'a self,
         thought: &'a Thought,
@@ -4086,6 +4408,43 @@ impl MentisDb {
         }
 
         (thought.index as f32 / newest_index as f32) * 0.05
+    }
+
+    fn thought_embedding_text(&self, thought: &Thought) -> String {
+        let mut sections = Vec::new();
+        let content = thought.content.trim();
+        if !content.is_empty() {
+            sections.push(content.to_string());
+        }
+        if !thought.concepts.is_empty() {
+            sections.push(format!("Concepts: {}", thought.concepts.join(", ")));
+        }
+        if !thought.tags.is_empty() {
+            sections.push(format!("Tags: {}", thought.tags.join(", ")));
+        }
+        if let Some(record) = self.agent_record_for(&thought.agent_id) {
+            if !record.display_name.trim().is_empty() && record.display_name != thought.agent_id {
+                sections.push(format!("Agent: {}", record.display_name));
+            }
+            if !record.aliases.is_empty() {
+                sections.push(format!("Aliases: {}", record.aliases.join(", ")));
+            }
+            if let Some(owner) = record
+                .owner
+                .as_ref()
+                .filter(|owner| !owner.trim().is_empty())
+            {
+                sections.push(format!("Owner: {owner}"));
+            }
+            if let Some(description) = record
+                .description
+                .as_ref()
+                .filter(|description| !description.trim().is_empty())
+            {
+                sections.push(format!("Description: {description}"));
+            }
+        }
+        sections.join("\n")
     }
 
     fn indexed_candidate_positions(&self, query: &ThoughtQuery) -> Option<Vec<usize>> {
@@ -4706,6 +5065,40 @@ fn chain_agent_registry_path(
         .strip_suffix(&format!(".{}", storage_kind.file_extension()))
         .unwrap_or(&storage_file);
     chain_dir.join(format!("{stem}.agents.json"))
+}
+
+fn chain_vector_sidecar_path(
+    chain_dir: &Path,
+    chain_key: &str,
+    storage_kind: StorageAdapterKind,
+    metadata: &crate::search::EmbeddingMetadata,
+) -> PathBuf {
+    let storage_file = chain_storage_filename(chain_key, storage_kind);
+    let stem = storage_file
+        .strip_suffix(&format!(".{}", storage_kind.file_extension()))
+        .unwrap_or(&storage_file);
+    let model = sanitize_sidecar_component(&metadata.model_id);
+    let version = sanitize_sidecar_component(&metadata.embedding_version);
+    chain_dir.join(format!(
+        "{stem}.vectors.{model}.{version}.{}d.json",
+        metadata.dimension
+    ))
+}
+
+fn sanitize_sidecar_component(value: &str) -> String {
+    let safe: String = value
+        .chars()
+        .map(|character| match character {
+            'a'..='z' | 'A'..='Z' | '0'..='9' => character.to_ascii_lowercase(),
+            _ => '-',
+        })
+        .collect();
+    let trimmed = safe.trim_matches('-');
+    if trimmed.is_empty() {
+        "default".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn load_agent_registry(

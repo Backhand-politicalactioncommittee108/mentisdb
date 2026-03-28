@@ -15,6 +15,10 @@ pub mod graph;
 pub mod lexical;
 /// Provenance path structures for graph expansion starting from lexical seeds.
 pub mod provenance;
+/// Rebuildable vector sidecar persistence for one durable chain.
+pub mod sidecar;
+/// Provider-agnostic vector and embedding helpers for deterministic ranking.
+pub mod vector;
 
 pub use bundle::{
     build_context_bundles, ContextBundle, ContextBundleHit, ContextBundleOptions,
@@ -28,3 +32,12 @@ pub use graph::{
     AdjacencyDirection, GraphEdge, GraphEdgeProvenance, ThoughtAdjacencyIndex, ThoughtLocator,
 };
 pub use provenance::{GraphExpansionHop, GraphExpansionPath, GraphExpansionPathError};
+pub use sidecar::{
+    VectorSidecar, VectorSidecarEntry, VectorSidecarFreshness, VectorSidecarIntegrity,
+    VECTOR_SIDECAR_SCHEMA_VERSION,
+};
+pub use vector::{
+    cosine_similarity, embed_batch_to_documents, EmbeddingBuildError, EmbeddingInput,
+    EmbeddingMetadata, EmbeddingProvider, EmbeddingVector, VectorDocument, VectorIndex,
+    VectorIndexError, VectorQuery, VectorSearchHit,
+};

@@ -1,4 +1,4 @@
-0.7.0.18 MAR/28/2026
+0.7.1.19 MAR/28/2026
  - feat(dashboard): wire chain explorer search to ranked retrieval and context bundles
    - Dashboard chain search now uses canonical ranked lexical+graph retrieval when search text is present, while preserving chronological filtering for plain agent/type-only browsing
    - Added grouped dashboard context-bundle inspection so operators can see seed-anchored supporting thoughts without flattening the entire graph into one list

@@ -434,8 +434,9 @@ The dedicated benchmark `benches/search_baseline.rs` and evaluation tests in `te
 MentisDB now also exposes an additive ranked-search surface for direct crate use:
 
 - `RankedSearchQuery`
+- `RankedSearchGraph`
 - `MentisDb::query_ranked(&RankedSearchQuery)`
-- `RankedSearchBackend::{Lexical, Heuristic}`
+- `RankedSearchBackend::{Lexical, LexicalGraph, Heuristic}`
 
 This surface is intentionally separate from `ThoughtQuery`.
 
@@ -446,15 +447,19 @@ Current ranked-search behavior:
 - `RankedSearchQuery.filter` uses the same deterministic semantics as `MentisDb::query`
 - when `text` normalizes to a non-empty query, the backend is `lexical`
 - lexical ranking scores indexed thought text plus agent metadata from the filtered candidate set
+- when `graph` is enabled alongside non-empty `text`, the backend becomes `lexical_graph`
+- graph expansion starts from lexical seed hits, walks `refs` and typed `relations`, and can surface supporting context that did not lexically match
 - when `text` is absent or blank, the backend falls back to `heuristic`
 - heuristic ordering uses lightweight importance, confidence, and recency signals
 - `total_candidates` counts the hits after filter application and lexical gating, before final `limit` truncation
 - each ranked hit includes `matched_terms` plus `match_sources` such as `content`, `tags`, `concepts`, `agent_id`, and `agent_registry`
+- graph-expanded hits also expose `graph_distance` and `graph_path` provenance so callers can explain why a supporting thought surfaced
 
 Example:
 
 ```rust,no_run
-use mentisdb::{MentisDb, RankedSearchQuery, ThoughtQuery, ThoughtType};
+use mentisdb::{MentisDb, RankedSearchGraph, RankedSearchQuery, ThoughtQuery, ThoughtType};
+use mentisdb::search::GraphExpansionMode;
 use std::path::PathBuf;
 
 # fn main() -> std::io::Result<()> {
@@ -467,6 +472,11 @@ let ranked = RankedSearchQuery::new()
             .with_tags_any(["search"]),
     )
     .with_text("latency ranking")
+    .with_graph(
+        RankedSearchGraph::new()
+            .with_max_depth(1)
+            .with_mode(GraphExpansionMode::Bidirectional),
+    )
     .with_limit(10);
 
 let results = chain.query_ranked(&ranked);

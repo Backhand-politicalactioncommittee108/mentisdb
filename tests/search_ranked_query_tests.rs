@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mentisdb::search::lexical::LexicalMatchSource;
+use mentisdb::search::{lexical::LexicalMatchSource, GraphExpansionMode};
 use mentisdb::{
-    MentisDb, RankedSearchBackend, RankedSearchQuery, ThoughtInput, ThoughtQuery, ThoughtType,
+    MentisDb, RankedSearchBackend, RankedSearchGraph, RankedSearchQuery, ThoughtInput,
+    ThoughtQuery, ThoughtRelation, ThoughtRelationKind, ThoughtType,
 };
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -218,6 +219,367 @@ fn ranked_query_scores_agent_registry_text_lexically() {
     assert!(ranked.hits[0]
         .match_sources
         .contains(&LexicalMatchSource::AgentRegistry));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ranked_query_with_graph_expansion_surfaces_supporting_context() {
+    let dir = unique_chain_dir();
+    let mut chain = MentisDb::open_with_key(&dir, "ranked-query-graph-context").unwrap();
+
+    let seed = chain
+        .append_thought(
+            "planner",
+            ThoughtInput::new(
+                ThoughtType::Decision,
+                "Latency ranking seed for retrieval planning.",
+            )
+            .with_tags(["search"])
+            .with_importance(0.9),
+        )
+        .unwrap()
+        .clone();
+    chain
+        .append_thought(
+            "planner",
+            ThoughtInput::new(
+                ThoughtType::Summary,
+                "Operator rollout checklist for the retrieval launch.",
+            )
+            .with_tags(["search"])
+            .with_relations(vec![ThoughtRelation {
+                kind: ThoughtRelationKind::DerivedFrom,
+                target_id: seed.id,
+                chain_key: None,
+            }]),
+        )
+        .unwrap();
+
+    let ranked = chain.query_ranked(
+        &RankedSearchQuery::new()
+            .with_filter(ThoughtQuery::new().with_tags_any(["search"]))
+            .with_text("latency ranking")
+            .with_graph(
+                RankedSearchGraph::new()
+                    .with_max_depth(1)
+                    .with_mode(GraphExpansionMode::Bidirectional),
+            ),
+    );
+
+    assert_eq!(ranked.backend, RankedSearchBackend::LexicalGraph);
+    assert_eq!(ranked.total_candidates, 2);
+    assert_eq!(ranked.hits.len(), 2);
+    assert_eq!(
+        ranked.hits[0].thought.content,
+        "Latency ranking seed for retrieval planning."
+    );
+
+    let supporting = ranked
+        .hits
+        .iter()
+        .find(|hit| hit.thought.content == "Operator rollout checklist for the retrieval launch.")
+        .unwrap();
+    assert_eq!(supporting.graph_distance, Some(1));
+    assert!(supporting.graph_path.is_some());
+    assert!(supporting.score.graph > 0.0);
+    assert!(supporting.matched_terms.is_empty());
+    assert!(supporting.match_sources.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ranked_query_graph_expansion_stays_inside_filtered_candidates() {
+    let dir = unique_chain_dir();
+    let mut chain = MentisDb::open_with_key(&dir, "ranked-query-graph-filter").unwrap();
+
+    let seed = chain
+        .append_thought(
+            "planner",
+            ThoughtInput::new(ThoughtType::Decision, "Latency ranking seed.").with_tags(["search"]),
+        )
+        .unwrap()
+        .clone();
+    chain
+        .append_thought(
+            "planner",
+            ThoughtInput::new(
+                ThoughtType::Summary,
+                "Unfiltered rollout note that points to the seed.",
+            )
+            .with_relations(vec![ThoughtRelation {
+                kind: ThoughtRelationKind::DerivedFrom,
+                target_id: seed.id,
+                chain_key: None,
+            }]),
+        )
+        .unwrap();
+
+    let ranked = chain.query_ranked(
+        &RankedSearchQuery::new()
+            .with_filter(ThoughtQuery::new().with_tags_any(["search"]))
+            .with_text("latency ranking")
+            .with_graph(RankedSearchGraph::new().with_max_depth(1)),
+    );
+
+    assert_eq!(ranked.backend, RankedSearchBackend::LexicalGraph);
+    assert_eq!(ranked.total_candidates, 1);
+    assert_eq!(ranked.hits.len(), 1);
+    assert_eq!(ranked.hits[0].thought.content, "Latency ranking seed.");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ranked_query_without_text_ignores_graph_configuration() {
+    let dir = unique_chain_dir();
+    let mut chain = MentisDb::open_with_key(&dir, "ranked-query-graph-without-text").unwrap();
+
+    chain
+        .append_thought(
+            "agent",
+            ThoughtInput::new(ThoughtType::Insight, "Older high-signal note.")
+                .with_importance(1.0)
+                .with_confidence(1.0)
+                .with_tags(["search"]),
+        )
+        .unwrap();
+    chain
+        .append_thought(
+            "agent",
+            ThoughtInput::new(ThoughtType::Insight, "Newer low-signal note.")
+                .with_importance(0.1)
+                .with_confidence(0.1)
+                .with_tags(["search"]),
+        )
+        .unwrap();
+
+    let ranked = chain.query_ranked(
+        &RankedSearchQuery::new()
+            .with_filter(ThoughtQuery::new().with_tags_any(["search"]))
+            .with_graph(RankedSearchGraph::new().with_max_depth(1)),
+    );
+
+    assert_eq!(ranked.backend, RankedSearchBackend::Heuristic);
+    assert_eq!(ranked.total_candidates, 2);
+    assert!(ranked.hits.iter().all(|hit| hit.graph_distance.is_none()));
+    assert!(ranked.hits.iter().all(|hit| hit.graph_path.is_none()));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ranked_query_graph_expansion_prefers_closer_supporting_context() {
+    let dir = unique_chain_dir();
+    let mut chain = MentisDb::open_with_key(&dir, "ranked-query-graph-depth-order").unwrap();
+
+    let seed = chain
+        .append_thought(
+            "planner",
+            ThoughtInput::new(
+                ThoughtType::Decision,
+                "Latency ranking seed for graph-aware retrieval.",
+            )
+            .with_tags(["search"]),
+        )
+        .unwrap()
+        .clone();
+    let first_hop = chain
+        .append_thought(
+            "planner",
+            ThoughtInput::new(
+                ThoughtType::Summary,
+                "First-hop support note for rollout preparation.",
+            )
+            .with_tags(["search"])
+            .with_relations(vec![ThoughtRelation {
+                kind: ThoughtRelationKind::DerivedFrom,
+                target_id: seed.id,
+                chain_key: None,
+            }]),
+        )
+        .unwrap()
+        .clone();
+    chain
+        .append_thought(
+            "planner",
+            ThoughtInput::new(
+                ThoughtType::Plan,
+                "Second-hop support note for operator coordination.",
+            )
+            .with_tags(["search"])
+            .with_relations(vec![ThoughtRelation {
+                kind: ThoughtRelationKind::ContinuesFrom,
+                target_id: first_hop.id,
+                chain_key: None,
+            }]),
+        )
+        .unwrap();
+
+    let ranked = chain.query_ranked(
+        &RankedSearchQuery::new()
+            .with_filter(ThoughtQuery::new().with_tags_any(["search"]))
+            .with_text("latency ranking")
+            .with_graph(
+                RankedSearchGraph::new()
+                    .with_mode(GraphExpansionMode::IncomingOnly)
+                    .with_max_depth(2),
+            ),
+    );
+
+    assert_eq!(ranked.backend, RankedSearchBackend::LexicalGraph);
+    assert_eq!(ranked.total_candidates, 3);
+    assert_eq!(ranked.hits.len(), 3);
+    assert_eq!(
+        ranked.hits[0].thought.content,
+        "Latency ranking seed for graph-aware retrieval."
+    );
+    assert_eq!(
+        ranked.hits[1].thought.content,
+        "First-hop support note for rollout preparation."
+    );
+    assert_eq!(
+        ranked.hits[2].thought.content,
+        "Second-hop support note for operator coordination."
+    );
+    assert_eq!(ranked.hits[1].graph_distance, Some(1));
+    assert_eq!(ranked.hits[2].graph_distance, Some(2));
+    assert!(ranked.hits[1].score.graph > ranked.hits[2].score.graph);
+
+    let visited = ranked.hits[2]
+        .graph_path
+        .as_ref()
+        .unwrap()
+        .visited()
+        .into_iter()
+        .map(|locator| locator.thought_index)
+        .collect::<Vec<_>>();
+    assert_eq!(visited, vec![Some(0), Some(1), Some(2)]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ranked_query_graph_expansion_can_surface_ref_backlinks() {
+    let dir = unique_chain_dir();
+    let mut chain = MentisDb::open_with_key(&dir, "ranked-query-graph-refs").unwrap();
+
+    chain
+        .append_thought(
+            "planner",
+            ThoughtInput::new(
+                ThoughtType::Decision,
+                "Retry budget search seed for backlink tests.",
+            )
+            .with_tags(["search"]),
+        )
+        .unwrap();
+    chain
+        .append_thought(
+            "planner",
+            ThoughtInput::new(
+                ThoughtType::Summary,
+                "Operational note with only a raw back-reference.",
+            )
+            .with_tags(["search"])
+            .with_refs(vec![0]),
+        )
+        .unwrap();
+
+    let ranked = chain.query_ranked(
+        &RankedSearchQuery::new()
+            .with_filter(ThoughtQuery::new().with_tags_any(["search"]))
+            .with_text("retry budget")
+            .with_graph(
+                RankedSearchGraph::new()
+                    .with_mode(GraphExpansionMode::IncomingOnly)
+                    .with_max_depth(1),
+            ),
+    );
+
+    assert_eq!(ranked.backend, RankedSearchBackend::LexicalGraph);
+    assert_eq!(ranked.total_candidates, 2);
+    assert_eq!(ranked.hits.len(), 2);
+
+    let backlink = ranked
+        .hits
+        .iter()
+        .find(|hit| hit.thought.content == "Operational note with only a raw back-reference.")
+        .unwrap();
+    assert_eq!(backlink.graph_distance, Some(1));
+    assert!(backlink.graph_path.is_some());
+    assert_eq!(backlink.matched_terms, Vec::<String>::new());
+    assert_eq!(
+        backlink
+            .graph_path
+            .as_ref()
+            .unwrap()
+            .visited()
+            .into_iter()
+            .map(|locator| locator.thought_index)
+            .collect::<Vec<_>>(),
+        vec![Some(0), Some(1)]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ranked_query_graph_without_seed_hits_still_keeps_lexical_match() {
+    let dir = unique_chain_dir();
+    let mut chain = MentisDb::open_with_key(&dir, "ranked-query-graph-no-seed-hits").unwrap();
+
+    let seed = chain
+        .append_thought(
+            "planner",
+            ThoughtInput::new(
+                ThoughtType::Decision,
+                "Incident memory seed for explicit include_seeds behavior.",
+            )
+            .with_tags(["search"]),
+        )
+        .unwrap()
+        .clone();
+    chain
+        .append_thought(
+            "planner",
+            ThoughtInput::new(
+                ThoughtType::Summary,
+                "Follow-up note reached only through graph expansion.",
+            )
+            .with_tags(["search"])
+            .with_relations(vec![ThoughtRelation {
+                kind: ThoughtRelationKind::DerivedFrom,
+                target_id: seed.id,
+                chain_key: None,
+            }]),
+        )
+        .unwrap();
+
+    let ranked = chain.query_ranked(
+        &RankedSearchQuery::new()
+            .with_filter(ThoughtQuery::new().with_tags_any(["search"]))
+            .with_text("incident memory")
+            .with_graph(
+                RankedSearchGraph::new()
+                    .with_include_seeds(false)
+                    .with_mode(GraphExpansionMode::IncomingOnly)
+                    .with_max_depth(1),
+            ),
+    );
+
+    assert_eq!(ranked.backend, RankedSearchBackend::LexicalGraph);
+    assert_eq!(ranked.total_candidates, 2);
+    assert_eq!(ranked.hits.len(), 2);
+    assert_eq!(
+        ranked.hits[0].thought.content,
+        "Incident memory seed for explicit include_seeds behavior."
+    );
+    assert!(ranked.hits[0].score.lexical > 0.0);
+    assert_eq!(ranked.hits[0].graph_distance, None);
+    assert!(ranked.hits[0].graph_path.is_none());
+    assert_eq!(ranked.hits[1].graph_distance, Some(1));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

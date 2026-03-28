@@ -2146,6 +2146,9 @@ impl ThoughtQuery {
 pub enum RankedSearchBackend {
     /// In-process lexical scoring over thought and agent-registry text.
     Lexical,
+    /// Lexical seed retrieval plus graph expansion over explicit refs and
+    /// typed relations.
+    LexicalGraph,
     /// Metadata-only fallback when no ranked text query is provided.
     Heuristic,
 }
@@ -2155,7 +2158,67 @@ impl RankedSearchBackend {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Lexical => "lexical",
+            Self::LexicalGraph => "lexical_graph",
             Self::Heuristic => "heuristic",
+        }
+    }
+}
+
+/// Graph-expansion configuration for ranked search.
+///
+/// This mode is additive: it starts from lexical seed matches inside the
+/// filtered candidate set, expands over `refs` and typed `relations`, then
+/// reranks any reached candidate thoughts as supporting context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RankedSearchGraph {
+    /// Maximum graph distance explored from each lexical seed.
+    pub max_depth: usize,
+    /// Maximum number of unique graph nodes visited while expanding.
+    pub max_visited: usize,
+    /// Whether lexical seed thoughts should appear as depth-0 graph hits.
+    pub include_seeds: bool,
+    /// Direction policy used while traversing the thought graph.
+    pub mode: crate::search::GraphExpansionMode,
+}
+
+impl RankedSearchGraph {
+    /// Create a graph-expansion request with default limits.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the maximum graph distance explored from each lexical seed.
+    pub fn with_max_depth(mut self, max_depth: usize) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
+
+    /// Set the visit budget for expansion.
+    pub fn with_max_visited(mut self, max_visited: usize) -> Self {
+        self.max_visited = max_visited.max(1);
+        self
+    }
+
+    /// Control whether lexical seeds are included in graph-expansion hits.
+    pub fn with_include_seeds(mut self, include_seeds: bool) -> Self {
+        self.include_seeds = include_seeds;
+        self
+    }
+
+    /// Replace the graph traversal direction mode.
+    pub fn with_mode(mut self, mode: crate::search::GraphExpansionMode) -> Self {
+        self.mode = mode;
+        self
+    }
+}
+
+impl Default for RankedSearchGraph {
+    fn default() -> Self {
+        Self {
+            max_depth: 2,
+            max_visited: 128,
+            include_seeds: true,
+            mode: crate::search::GraphExpansionMode::Bidirectional,
         }
     }
 }
@@ -2171,6 +2234,12 @@ pub struct RankedSearchQuery {
     pub filter: ThoughtQuery,
     /// Optional lexical text query used for ranked scoring.
     pub text: Option<String>,
+    /// Optional graph-expansion pass seeded from lexical matches.
+    ///
+    /// This configuration is only used when `text` normalizes to a non-empty
+    /// lexical query. When `text` is absent or blank, ranked search falls back
+    /// to metadata heuristics and graph expansion is ignored.
+    pub graph: Option<RankedSearchGraph>,
     /// Maximum number of ranked hits to return.
     pub limit: usize,
 }
@@ -2193,6 +2262,12 @@ impl RankedSearchQuery {
         self
     }
 
+    /// Enable graph-aware ranked retrieval seeded from lexical matches.
+    pub fn with_graph(mut self, graph: RankedSearchGraph) -> Self {
+        self.graph = Some(graph);
+        self
+    }
+
     /// Limit the number of ranked hits returned.
     pub fn with_limit(mut self, limit: usize) -> Self {
         self.limit = limit.max(1);
@@ -2205,6 +2280,7 @@ impl Default for RankedSearchQuery {
         Self {
             filter: ThoughtQuery::new(),
             text: None,
+            graph: None,
             limit: 10,
         }
     }
@@ -2215,6 +2291,8 @@ impl Default for RankedSearchQuery {
 pub struct RankedSearchScore {
     /// Score contributed by lexical matching.
     pub lexical: f32,
+    /// Score contributed by graph proximity to a lexical seed.
+    pub graph: f32,
     /// Score contributed by the thought's importance value.
     pub importance: f32,
     /// Score contributed by the thought's confidence value.
@@ -2232,6 +2310,10 @@ pub struct RankedSearchHit<'a> {
     pub thought: &'a Thought,
     /// Score breakdown for this hit.
     pub score: RankedSearchScore,
+    /// Graph distance from the lexical seed that surfaced this hit.
+    pub graph_distance: Option<usize>,
+    /// Provenance path from the originating lexical seed to this hit.
+    pub graph_path: Option<crate::search::GraphExpansionPath>,
     /// Unique normalized query terms that matched this hit.
     pub matched_terms: Vec<String>,
     /// Indexed field sources that contributed to the lexical score.
@@ -3535,8 +3617,8 @@ impl MentisDb {
     ///
     /// Ranked search is additive: it first applies the embedded
     /// [`ThoughtQuery`] with the same semantics as [`MentisDb::query`], then
-    /// reorders the matching candidates by lexical score (when `text` is
-    /// provided) or by lightweight metadata heuristics.
+    /// reorders the matching candidates by lexical score, optional
+    /// graph-expansion proximity, or lightweight metadata heuristics.
     pub fn query_ranked(&self, request: &RankedSearchQuery) -> RankedSearchResult<'_> {
         let candidates = self.query(&request.filter);
         let ranked_text = request
@@ -3544,16 +3626,25 @@ impl MentisDb {
             .as_deref()
             .map(str::trim)
             .filter(|text| !text.is_empty());
-        let backend = ranked_text
-            .as_ref()
-            .map(|_| RankedSearchBackend::Lexical)
-            .unwrap_or(RankedSearchBackend::Heuristic);
         let lexical_scores = ranked_text
             .map(|text| self.rank_candidates_lexically(&candidates, text))
             .unwrap_or_default();
+        let graph_scores = ranked_text
+            .and(request.graph.as_ref())
+            .map(|graph| self.expand_ranked_candidates(&candidates, graph, &lexical_scores))
+            .unwrap_or_default();
+        let backend = if ranked_text.is_some() && request.graph.is_some() {
+            RankedSearchBackend::LexicalGraph
+        } else if ranked_text.is_some() {
+            RankedSearchBackend::Lexical
+        } else {
+            RankedSearchBackend::Heuristic
+        };
         let mut hits: Vec<RankedSearchHit<'_>> = candidates
             .into_iter()
-            .filter_map(|thought| self.rank_search_hit(thought, ranked_text, &lexical_scores))
+            .filter_map(|thought| {
+                self.rank_search_hit(thought, ranked_text, &lexical_scores, &graph_scores)
+            })
             .collect();
         let total_candidates = hits.len();
 
@@ -3563,6 +3654,7 @@ impl MentisDb {
                 .total
                 .total_cmp(&left.score.total)
                 .then_with(|| right.score.lexical.total_cmp(&left.score.lexical))
+                .then_with(|| right.score.graph.total_cmp(&left.score.graph))
                 .then_with(|| right.thought.importance.total_cmp(&left.thought.importance))
                 .then_with(|| {
                     right
@@ -3590,34 +3682,54 @@ impl MentisDb {
         thought: &'a Thought,
         ranked_text: Option<&str>,
         lexical_hits: &HashMap<usize, crate::search::lexical::LexicalHit>,
+        graph_hits: &HashMap<usize, crate::search::GraphExpansionHit>,
     ) -> Option<RankedSearchHit<'a>> {
-        let (lexical, matched_terms, match_sources) = if ranked_text.is_some() {
-            let hit = lexical_hits.get(&(thought.index as usize))?;
-            if hit.score == 0.0 {
-                return None;
-            }
-            (
-                hit.score,
-                hit.matched_terms.clone(),
-                hit.match_sources.clone(),
-            )
-        } else {
-            (0.0, Vec::new(), Vec::new())
-        };
+        let (lexical, graph, graph_distance, graph_path, matched_terms, match_sources) =
+            if ranked_text.is_some() {
+                let lexical_hit = lexical_hits.get(&(thought.index as usize));
+                let graph_hit = graph_hits.get(&(thought.index as usize));
+
+                match (lexical_hit, graph_hit) {
+                    (Some(hit), graph_hit) if hit.score > 0.0 => (
+                        hit.score,
+                        graph_hit
+                            .map(|hit| self.graph_proximity_score(hit.depth))
+                            .unwrap_or_default(),
+                        graph_hit.map(|hit| hit.depth),
+                        graph_hit.map(|hit| hit.path.clone()),
+                        hit.matched_terms.clone(),
+                        hit.match_sources.clone(),
+                    ),
+                    (None, Some(hit)) => (
+                        0.0,
+                        self.graph_proximity_score(hit.depth),
+                        Some(hit.depth),
+                        Some(hit.path.clone()),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                    _ => return None,
+                }
+            } else {
+                (0.0, 0.0, None, None, Vec::new(), Vec::new())
+            };
         let importance = thought.importance * 0.2;
         let confidence = thought.confidence.unwrap_or_default() * 0.1;
         let recency = self.recency_score(thought);
-        let total = lexical + importance + confidence + recency;
+        let total = lexical + graph + importance + confidence + recency;
 
         Some(RankedSearchHit {
             thought,
             score: RankedSearchScore {
                 lexical,
+                graph,
                 importance,
                 confidence,
                 recency,
                 total,
             },
+            graph_distance,
+            graph_path,
             matched_terms,
             match_sources,
         })
@@ -3641,6 +3753,69 @@ impl MentisDb {
             .into_iter()
             .map(|hit| (hit.doc_position, hit))
             .collect()
+    }
+
+    fn expand_ranked_candidates(
+        &self,
+        candidates: &[&Thought],
+        graph: &RankedSearchGraph,
+        lexical_hits: &HashMap<usize, crate::search::lexical::LexicalHit>,
+    ) -> HashMap<usize, crate::search::GraphExpansionHit> {
+        if lexical_hits.is_empty() {
+            return HashMap::new();
+        }
+
+        let adjacency = crate::search::ThoughtAdjacencyIndex::from_thoughts(&self.thoughts);
+        let candidate_positions: HashSet<usize> = candidates
+            .iter()
+            .map(|thought| thought.index as usize)
+            .collect();
+        let mut lexical_seed_hits: Vec<&crate::search::lexical::LexicalHit> =
+            lexical_hits.values().collect();
+        lexical_seed_hits.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.doc_position.cmp(&right.doc_position))
+        });
+
+        let seeds: Vec<crate::search::ThoughtLocator> = lexical_seed_hits
+            .into_iter()
+            .filter_map(|hit| {
+                adjacency
+                    .local_locator_for_index(hit.doc_position as u64)
+                    .cloned()
+            })
+            .collect();
+        if seeds.is_empty() {
+            return HashMap::new();
+        }
+
+        crate::search::GraphExpansionResult::expand(
+            &adjacency,
+            &crate::search::GraphExpansionQuery::new(seeds)
+                .with_max_depth(graph.max_depth)
+                .with_max_visited(graph.max_visited)
+                .with_include_seeds(graph.include_seeds)
+                .with_mode(graph.mode),
+        )
+        .hits
+        .into_iter()
+        .filter_map(|hit| {
+            let position = hit.locator.thought_index? as usize;
+            candidate_positions
+                .contains(&position)
+                .then_some((position, hit))
+        })
+        .collect()
+    }
+
+    fn graph_proximity_score(&self, depth: usize) -> f32 {
+        if depth == 0 {
+            0.0
+        } else {
+            0.3 / depth as f32
+        }
     }
 
     fn recency_score(&self, thought: &Thought) -> f32 {

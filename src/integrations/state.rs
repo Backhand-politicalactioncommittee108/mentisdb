@@ -124,7 +124,15 @@ fn split_path_entries(path: Option<OsString>) -> Vec<PathBuf> {
 }
 
 fn is_executable_file(path: &Path) -> bool {
-    fs::metadata(path)
-        .map(|metadata| metadata.is_file())
-        .unwrap_or(false)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
+    }
 }

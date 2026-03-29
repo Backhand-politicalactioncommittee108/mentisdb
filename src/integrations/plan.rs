@@ -185,10 +185,18 @@ fn plan_from_detection(detection: IntegrationDetection, url: String) -> SetupPla
     };
 
     match integration {
-        IntegrationKind::ClaudeDesktop => notes.push(
-            "Claude Desktop requires an HTTPS MCP endpoint and the mcp-remote bridge."
-                .to_string(),
-        ),
+        IntegrationKind::ClaudeDesktop => {
+            notes.push(
+                "Claude Desktop requires an HTTPS MCP endpoint and the mcp-remote bridge."
+                    .to_string(),
+            );
+            if url.starts_with("https://") {
+                notes.push(
+                    "Warning: NODE_TLS_REJECT_UNAUTHORIZED=0 is set to allow self-signed certificates. Only use this with trusted private servers."
+                        .to_string(),
+                );
+            }
+        }
         IntegrationKind::GeminiCli => notes.push(
             "Gemini setup writes both 'url' and 'httpUrl' fields to cover current remote HTTP config variants."
                 .to_string(),

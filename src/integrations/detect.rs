@@ -1,5 +1,6 @@
 //! Filesystem detection helpers for MentisDB host integrations.
 
+use crate::integrations::files::strip_json_comments;
 use crate::integrations::{
     integration_specs, IntegrationKind, IntegrationPathKind, IntegrationSpec,
 };
@@ -188,7 +189,8 @@ fn json_has_entry(path: &std::path::Path, keys: &[&str]) -> bool {
     let Ok(content) = fs::read_to_string(path) else {
         return false;
     };
-    let Ok(value) = serde_json::from_str::<Value>(&content) else {
+    let stripped = strip_json_comments(&content);
+    let Ok(value) = serde_json::from_str::<Value>(&stripped) else {
         return false;
     };
     let mut current = &value;

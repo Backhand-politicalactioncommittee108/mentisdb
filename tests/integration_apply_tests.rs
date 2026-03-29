@@ -295,6 +295,11 @@ fn apply_claude_desktop_uses_https_and_bridge_from_path() {
     std::fs::create_dir_all(&bin_dir).unwrap();
     let mcp_remote = bin_dir.join("mcp-remote");
     std::fs::write(&mcp_remote, "#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&mcp_remote, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     let previous_path = std::env::var_os("PATH");
     std::env::set_var("PATH", &bin_dir);

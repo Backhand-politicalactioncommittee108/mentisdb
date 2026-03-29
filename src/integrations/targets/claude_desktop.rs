@@ -15,6 +15,10 @@ pub(super) fn build(
         )
         .set_path(["mcpServers", settings.server_name(), "args"], json!([url]));
 
+    // SECURITY: NODE_TLS_REJECT_UNAUTHORIZED=0 disables TLS certificate verification for the
+    // mcp-remote bridge. This is required for self-signed certificates on private servers.
+    // A visible warning is surfaced via the SetupPlan notes when building the plan in plan.rs.
+    // TODO: expose a user-facing --allow-insecure flag to make this opt-in rather than automatic.
     if url.starts_with("https://") {
         patch = patch.set_path(
             [

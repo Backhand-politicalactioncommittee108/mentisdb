@@ -206,7 +206,10 @@ fn resolve_selections(catalog: &SetupCatalogPlan, raw: &str) -> io::Result<Vec<I
 
 fn parse_selection(value: &str) -> Option<IntegrationKind> {
     if let Ok(index) = value.trim().parse::<usize>() {
-        return IntegrationKind::ALL.get(index.saturating_sub(1)).copied();
+        if index == 0 {
+            return None;
+        }
+        return IntegrationKind::ALL.get(index - 1).copied();
     }
 
     parse_integration(value)

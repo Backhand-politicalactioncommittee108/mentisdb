@@ -361,14 +361,14 @@ async fn get_or_open_chain(
         if state.auto_flush {
             if let Some(storage) = registered_storage {
                 if let Ok(mut refreshed) = MentisDb::open_with_storage(storage) {
-                    if refreshed.set_auto_flush(state.auto_flush).is_ok() {
-                        if refreshed.apply_persisted_managed_vector_sidecars().is_ok() {
-                            let refreshed = Arc::new(RwLock::new(refreshed));
-                            state
-                                .chains
-                                .insert(chain_key.to_string(), refreshed.clone());
-                            return Ok(refreshed);
-                        }
+                    if refreshed.set_auto_flush(state.auto_flush).is_ok()
+                        && refreshed.apply_persisted_managed_vector_sidecars().is_ok()
+                    {
+                        let refreshed = Arc::new(RwLock::new(refreshed));
+                        state
+                            .chains
+                            .insert(chain_key.to_string(), refreshed.clone());
+                        return Ok(refreshed);
                     }
                 }
             }

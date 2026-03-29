@@ -4750,22 +4750,19 @@ impl MentisDb {
             let documents: Vec<crate::search::VectorDocument> = sidecar
                 .entries
                 .iter()
-                .filter_map(|entry| {
-                    candidate_positions
-                        .contains_key(&entry.thought_id.to_string())
-                        .then(|| {
-                            crate::search::VectorDocument::new(
-                                entry.thought_id.to_string(),
-                                entry.vector.clone(),
-                            )
-                        })
+                .filter(|entry| candidate_positions.contains_key(&entry.thought_id.to_string()))
+                .map(|entry| {
+                    crate::search::VectorDocument::new(
+                        entry.thought_id.to_string(),
+                        entry.vector.clone(),
+                    )
                 })
                 .collect();
             if documents.is_empty() {
                 continue;
             }
 
-            let limit = documents.len().min(MAX_VECTOR_HITS).max(1);
+            let limit = documents.len().clamp(1, MAX_VECTOR_HITS);
             let index = match crate::search::VectorIndex::from_documents(metadata, documents) {
                 Ok(index) => index,
                 Err(_) => continue,
@@ -6504,7 +6501,15 @@ fn load_legacy_v0_binary_thoughts(file_path: &Path) -> io::Result<Vec<LegacyThou
             Err(error) => return Err(error),
         }
 
-        let length = u64::from_le_bytes(length_bytes) as usize;
+        const MAX_THOUGHT_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
+        let length_u64 = u64::from_le_bytes(length_bytes);
+        if length_u64 > MAX_THOUGHT_PAYLOAD_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("binary thought payload length {length_u64} exceeds maximum {MAX_THOUGHT_PAYLOAD_BYTES}"),
+            ));
+        }
+        let length = length_u64 as usize;
         let mut payload = vec![0_u8; length];
         file.read_exact(&mut payload)?;
         let (thought, _): (LegacyThoughtV0, usize) =
@@ -6932,7 +6937,15 @@ fn load_binary_thoughts(file_path: &Path) -> io::Result<Vec<Thought>> {
             Err(error) => return Err(error),
         }
 
-        let length = u64::from_le_bytes(length_bytes) as usize;
+        const MAX_THOUGHT_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
+        let length_u64 = u64::from_le_bytes(length_bytes);
+        if length_u64 > MAX_THOUGHT_PAYLOAD_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("binary thought payload length {length_u64} exceeds maximum {MAX_THOUGHT_PAYLOAD_BYTES}"),
+            ));
+        }
+        let length = length_u64 as usize;
         let mut payload = vec![0_u8; length];
         file.read_exact(&mut payload)?;
         let (thought, _bytes_read): (Thought, usize) =
@@ -7009,7 +7022,8 @@ fn compute_thought_hash(thought: &Thought) -> String {
         prev_hash: &thought.prev_hash,
     };
 
-    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    let bytes =
+        serde_json::to_vec(&canonical).expect("canonical thought serialization should not fail");
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())

@@ -490,7 +490,35 @@ Current ranked-search behavior:
 - graph-expanded hits also expose `graph_distance`, `graph_seed_paths`, `graph_relation_kinds`, and `graph_path` provenance so callers can explain why a supporting thought surfaced
 - grouped context delivery is available through `query_context_bundles`, which anchors supporting graph hits beneath lexical seeds in deterministic order
 
-Example:
+Lexical ranked example:
+
+```rust,no_run
+use mentisdb::{MentisDb, RankedSearchQuery, ThoughtQuery, ThoughtType};
+use std::path::PathBuf;
+
+# fn main() -> std::io::Result<()> {
+let chain = MentisDb::open(&PathBuf::from("/tmp/tc_ranked"), "agent1", "Agent", None, None)?;
+
+let ranked = RankedSearchQuery::new()
+    .with_filter(
+        ThoughtQuery::new()
+            .with_types(vec![ThoughtType::Decision])
+            .with_tags_any(["search"]),
+    )
+    .with_text("latency ranking")
+    .with_limit(10);
+
+let results = chain.query_ranked(&ranked);
+assert!(matches!(
+    results.backend,
+    mentisdb::RankedSearchBackend::Lexical | mentisdb::RankedSearchBackend::Hybrid
+));
+# let _ = results;
+# Ok(())
+# }
+```
+
+Lexical + graph ranked example:
 
 ```rust,no_run
 use mentisdb::{MentisDb, RankedSearchGraph, RankedSearchQuery, ThoughtQuery, ThoughtType};
@@ -516,6 +544,29 @@ let ranked = RankedSearchQuery::new()
 
 let results = chain.query_ranked(&ranked);
 # let _ = results;
+# Ok(())
+# }
+```
+
+Vector-backed ranked example:
+
+```rust,no_run
+use mentisdb::{MentisDb, RankedSearchBackend, RankedSearchQuery};
+use mentisdb::search::LocalTextEmbeddingProvider;
+use std::path::PathBuf;
+
+# fn main() -> std::io::Result<()> {
+let mut chain = MentisDb::open_with_key(&PathBuf::from("/tmp/tc_ranked_vectors"), "semantic-ranked")?;
+chain.append("planner", mentisdb::ThoughtType::Decision, "Tail latency ceiling for the Europe rollout.")?;
+
+// Register the built-in local-text-v1 embedding sidecar so ranked search can
+// blend lexical and semantic signals for the current chain handle.
+chain.manage_vector_sidecar(LocalTextEmbeddingProvider::new())?;
+
+let ranked = chain.query_ranked(&RankedSearchQuery::new().with_text("performance budget"));
+
+assert_eq!(ranked.backend, RankedSearchBackend::Hybrid);
+assert!(ranked.hits.iter().any(|hit| hit.score.vector > 0.0));
 # Ok(())
 # }
 ```
@@ -611,6 +662,8 @@ Operational flow:
 
 The daemon also exposes the Phase 1 ranked lexical surface over REST at `POST /v1/lexical-search`.
 
+This is the right endpoint when you want lexicographical/lexical text ranking only, with simple score and match provenance fields.
+
 Request shape:
 
 ```json
@@ -624,6 +677,26 @@ Request shape:
 }
 ```
 
+Example response:
+
+```json
+{
+  "total": 1,
+  "results": [
+    {
+      "thought": {
+        "index": 42,
+        "agent_id": "planner",
+        "content": "Latency budget for the Europe rollout."
+      },
+      "score": 2.91,
+      "matched_terms": ["latency", "ranking"],
+      "match_sources": ["content", "tags", "agent_registry"]
+    }
+  ]
+}
+```
+
 ### Phase 4 Transport Contract (Ranked + Bundles)
 
 Phase 4 transport work keeps plain `POST /v1/search` and `POST /v1/lexical-search`
@@ -631,6 +704,19 @@ compatibility and adds two additive endpoints:
 
 - `POST /v1/ranked-search` for flat ranked retrieval
 - `POST /v1/context-bundles` for seed-anchored grouped support context
+
+Example `POST /v1/ranked-search` request:
+
+```json
+{
+  "chain_key": "mentisdb",
+  "text": "performance budget",
+  "thought_types": ["Decision"],
+  "limit": 10
+}
+```
+
+When a managed vector sidecar such as the built-in `local-text-v1` provider is active for that chain, the ranked backend becomes `hybrid` or `hybrid_graph` and the response includes a non-zero `score.vector` component for semantic-only or semantic-boosted hits.
 
 Ranked response contract fields:
 
